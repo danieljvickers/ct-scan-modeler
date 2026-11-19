@@ -53,14 +53,18 @@ class Case:
     def to_json(self):
         return json.dumps(self.values, indent=4)
 
-    def to_input_file(self):
-        """Flat 'key value' lines for the CUDA solver: every scalar plus the patches in use, with STL paths made absolute."""
+    def to_input_file(self, output_dir=None):
+        """Flat 'key value' lines for the CUDA solver: every scalar plus the patches in use, with STL paths made absolute.
+
+        The solver writes D/ under case_dir, or under output_dir when given; STL paths always resolve against case_dir.
+        """
         def formatted(value):
             if isinstance(value, bool):
                 return "T" if value else "F"
             return repr(value) if isinstance(value, float) else str(value)
 
-        lines = [f"{name} {formatted(value)}" for name, value in sorted(self.values.items()) if name in parameters.SCALARS]
+        values = dict(self.values, case_dir=os.path.abspath(output_dir or self["case_dir"]))
+        lines = [f"{name} {formatted(value)}" for name, value in sorted(values.items()) if name in parameters.SCALARS]
         for base_name, count_name in (("patch_icpp", "num_patches"), ("patch_ib", "num_ibs")):
             for index in range(1, self[count_name] + 1):
                 for attribute, value in self.family(base_name, index).items():

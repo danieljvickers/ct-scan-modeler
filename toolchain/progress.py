@@ -22,7 +22,7 @@ def run_with_progress(command, label, environment, verbose=False):
 
     output = []
     columns = (SpinnerColumn(), TextColumn(f"[bold blue]{label}"), BarColumn(bar_width=30), TaskProgressColumn(), TimeElapsedColumn())
-    with Progress(*columns, console=console, transient=True) as progress:
+    with Progress(*columns, console=console, transient=True, disable=not console.is_terminal) as progress:  # no bar in logs or pipes
         task = progress.add_task(label, total=None)  # no total pulses the bar until make reports a percentage
         process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         for line in process.stdout:

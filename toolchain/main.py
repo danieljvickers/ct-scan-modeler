@@ -8,6 +8,7 @@ import sys
 from toolchain.build import build
 from toolchain.computers import list_computers
 from toolchain.run import run
+from toolchain.test import test
 
 
 def add_build_arguments(parser):
@@ -33,7 +34,10 @@ def make_parser():
     build_parser = commands.add_parser("build", allow_abbrev=False, help="generic build without case optimization")
     add_build_arguments(build_parser)
 
-    commands.add_parser("test", help="not implemented yet")
+    test_parser = commands.add_parser("test", allow_abbrev=False, help="regression tests from the examples, generic build")
+    test_parser.add_argument("--generate", action="store_true", help="write new golden files instead of comparing")
+    test_parser.add_argument("-o", "--only", nargs="+", default=[], help="test ids or parts of test names to run")
+    add_build_arguments(test_parser)
     commands.add_parser("model", help="not implemented yet")
     return parser
 
@@ -43,6 +47,8 @@ def main():
     try:
         if arguments.command == "run":
             run(arguments)
+        elif arguments.command == "test":
+            test(arguments)
         elif arguments.command == "build":
             print(f"INFO :: installed {build(None, arguments.computer, arguments.jobs, arguments.debug, arguments.verbose)}")
         else:

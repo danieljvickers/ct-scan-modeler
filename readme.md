@@ -67,7 +67,25 @@ Each build configuration has its own directory, `build/staging/<hash>` and `buil
 | `--no-case-optimization` | off | Generic build |
 | `--hostfile` | none | MPI hostfile for multinode runs outside Slurm |
 
-A computer is one shell script in `toolchain/computers` that exports the compilers, MPI, and `CTM_CUDA_ARCHITECTURES`, with a `# aliases:` comment line. `test` and `model` are placeholders.
+### Regression tests
+
+```bash
+./ctm.sh test -c w                       # every test, generic build
+./ctm.sh test -c w --only "no-slip"      # tests whose id or name matches
+./ctm.sh test -c w --generate            # rewrite the golden files after an intended change
+build/venv/bin/python -m pytest tests    # unit tests of the prototype and toolchain
+```
+
+Each test in `toolchain/test_cases.py` starts from an example's `case.py`, divides the cells per direction by its coarsening factor (4 by default), multiplies `dt` by the same factor to keep the CFL number, and runs 20 steps in `build/tests/<id>`. The id is a hash of the test name. The last save is reduced to the L1, L2, and max norms and the sum of every field, 64 probe values per field, and the final body forces. These values are compared with `tests/regression/<id>/golden.txt` using a relative tolerance of 1e-8, plus an absolute floor of 1e-9 times each entry's largest magnitude so round-off zeros, such as the lift of a symmetric body, pass. A test with `golden_from` must reproduce another test's golden file; the 2 GPU cylinder uses this to check that the decomposition does not change the answer.
+
+| Test | Covers |
+|---|---|
+| 2D cylinder | geometry, ghost points, both implicit solves, forces |
+| 2D cylinder on 2 GPUs | halo exchange and distributed transforms, against the 1 GPU golden |
+| 2D cylinder without immersed boundary | domain boundaries and solvers alone |
+| 2D cylinder with no-slip walls | the -16 boundary rules |
+
+A computer is one shell script in `toolchain/computers` that exports the compilers, MPI, and `CTM_CUDA_ARCHITECTURES`, with a `# aliases:` comment line. `model` is a placeholder.
 
 ## Numerical method
 

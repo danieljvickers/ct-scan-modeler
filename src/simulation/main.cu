@@ -21,7 +21,7 @@ int selectDevice() {
 
 void formatDuration(real seconds, char* text, size_t size) {
     const long whole = static_cast<long>(seconds);
-    std::snprintf(text, size, "%02ld:%02ld:%02ld", whole/3600, (whole/60) % 60, whole % 60);
+    std::snprintf(text, size, "%ld:%02ld:%02ld", whole/3600, (whole/60) % 60, whole % 60);
 }
 
 void run(const char* input_path) {
@@ -69,13 +69,13 @@ void run(const char* input_path) {
             const real max_divergence = solver.maxDivergence();
             const real elapsed = MPI_Wtime() - loop_start;
             const int steps_done = step - parameters.t_step_start;
-            char remaining[32];
-            formatDuration(elapsed/steps_done*(num_steps - steps_done), remaining, sizeof(remaining));
+            char eta[32];
+            formatDuration(elapsed/steps_done*(num_steps - steps_done), eta, sizeof(eta));
             const auto iterations = solver.lastIterations();
             if (is_root)
-                std::printf("INFO :: step %d/%d, t = %.4f, max |div u| %.2e, u/v/w/p iterations %d/%d/%d/%d, %.4f s/step, %s left\n", step,
-                            parameters.t_step_stop, time, max_divergence, iterations[0], iterations[1], iterations[2], iterations[3],
-                            elapsed/steps_done, remaining);
+                std::printf("step %d/%d (%.1f%%) :: max |∇·u| %.2e :: u/v/w/p iterations %d/%d/%d/%d :: %.4f s/step :: ETA %s\n", step,
+                            parameters.t_step_stop, 100.0*steps_done/num_steps, max_divergence, iterations[0], iterations[1], iterations[2],
+                            iterations[3], elapsed/steps_done, eta);
         }
         if (!is_save) continue;
 
