@@ -1,5 +1,7 @@
 """Case checks shared by the Python prototype and the CUDA solver."""
 
+import os
+
 from toolchain import constants
 
 
@@ -10,8 +12,6 @@ def num_dims(case):
 def validate_case(case):
     dims = num_dims(case)
     assert dims >= 2, "ERROR :: cases must be 2D (n > 0) or 3D (n > 0, p > 0)"
-    assert case["num_fluids"] == 1, "ERROR :: only num_fluids = 1 is supported"
-    assert case["time_stepper"] == constants.TIME_STEPPER_AB2_CN, "ERROR :: only time_stepper = 1 (AB2/CN) is supported"
     assert case["poisson_solver"] in (constants.POISSON_SPARSE_LU, constants.POISSON_SPECTRAL_KRYLOV), \
         "ERROR :: poisson_solver must be 1 (sparse LU) or 2 (spectral Krylov)"
     if case["poisson_solver"] == constants.POISSON_SPECTRAL_KRYLOV:
@@ -33,11 +33,9 @@ def validate_case(case):
 
     if not case["ib"]:
         return
-    assert case["ibm_ip_interpolation"] == constants.IP_INTERP_BILINEAR, "ERROR :: only ibm_ip_interpolation = 2 is supported"
     assert case["gp_layers"] >= 1, "ERROR :: gp_layers must be at least 1"
-    stl_geometry = constants.IB_STL_2D if dims == 2 else constants.IB_STL_3D
     for patch_id in range(1, case["num_ibs"] + 1):
         patch = case.family("patch_ib", patch_id)
-        assert patch["geometry"] == stl_geometry, f"ERROR :: patch_ib({patch_id}) must be a {dims}D STL (geometry = {stl_geometry})"
+        stl_path = os.path.join(case["case_dir"], patch["geometry"])
+        assert os.path.isfile(stl_path), f"ERROR :: patch_ib({patch_id})%geometry {stl_path} does not exist"
         assert not patch["slip"], f"ERROR :: patch_ib({patch_id}) slip walls are not supported"
-        assert 1 <= patch["model_id"] <= case["num_stl_models"], f"ERROR :: patch_ib({patch_id})%model_id is out of range"

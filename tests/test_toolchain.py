@@ -17,16 +17,16 @@ def test_wingtip_alias_and_environment():
 
 
 def test_case_header_holds_every_case_optimized_parameter():
-    header = case_header(load_case(CYLINDER_CASE, ["--cells_per_diameter", "8"]))
-    assert "constexpr int m = 479;" in header and "constexpr bool viscous = true;" in header
+    header = case_header(load_case(CYLINDER_CASE))
+    assert "constexpr int m = 1919;" in header and "constexpr bool viscous = true;" in header
     for name in parameters.CASE_OPTIMIZATION:
         assert f" {name} = " in header
 
 
 def test_build_configuration_changes_only_with_case_optimized_parameters():
-    coarse = load_case(CYLINDER_CASE, ["--cells_per_diameter", "8"])
-    longer = load_case(CYLINDER_CASE, ["--cells_per_diameter", "8", "--t_stop", "5"])
-    finer = load_case(CYLINDER_CASE, ["--cells_per_diameter", "16"])
-    assert build_configuration(coarse, "w", False) == build_configuration(longer, "w", False)
-    assert build_configuration(coarse, "w", False) != build_configuration(finer, "w", False)
+    reference, longer, finer = (load_case(CYLINDER_CASE) for _ in range(3))
+    longer.values["t_step_stop"] *= 2
+    finer.values["m"] = 2*reference["m"] + 1
+    assert build_configuration(reference, "w", False) == build_configuration(longer, "w", False)
+    assert build_configuration(reference, "w", False) != build_configuration(finer, "w", False)
     assert build_configuration(None, "w", False)["case_optimization"] is None

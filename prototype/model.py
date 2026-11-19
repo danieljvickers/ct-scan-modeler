@@ -117,14 +117,14 @@ def outward_edge_normals_2d(edges):
 class Model2D:
     """A 2D STL outline placed in the domain."""
 
-    def __init__(self, stl_parameters, case_dir):
-        filepath = os.path.join(case_dir, stl_parameters["model_filepath"])
+    def __init__(self, patch, case_dir):
+        filepath = os.path.join(case_dir, patch["geometry"])
         triangles = transform_triangles(read_stl(filepath),
-                                        [stl_parameters[f"model_scale({k})"] for k in range(1, 4)],
-                                        [stl_parameters[f"model_rotate({k})"] for k in range(1, 4)],
-                                        [stl_parameters[f"model_translate({k})"] for k in range(1, 4)])
+                                        [patch[f"model_scale({k})"] for k in range(1, 4)],
+                                        [patch[f"model_rotate({k})"] for k in range(1, 4)],
+                                        [patch[f"model_translate({k})"] for k in range(1, 4)])
         self.filepath = filepath
-        self.threshold = stl_parameters["model_threshold"]
+        self.threshold = patch["model_threshold"]
         self.edges = boundary_edges_2d(triangles)
         self.bounding_box = np.array([self.edges.reshape(-1, 2).min(axis=0), self.edges.reshape(-1, 2).max(axis=0)])
 

@@ -1,4 +1,4 @@
-"""Run a case with the 2D Python prototype: python -m prototype path/to/case.py [case arguments]."""
+"""Run a case with the 2D Python prototype: python -m prototype path/to/case.py."""
 
 import argparse
 import os
@@ -21,9 +21,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("case_path", help="path to case.py")
     parser.add_argument("--output_dir", default=None, help="output directory, defaults to <case_dir>/D")
-    arguments, case_arguments = parser.parse_known_args()
+    arguments = parser.parse_args()
 
-    case = load_case(arguments.case_path, case_arguments)
+    case = load_case(arguments.case_path)
     check_case(case)
     output_dir = arguments.output_dir or os.path.join(case["case_dir"], "D")
 

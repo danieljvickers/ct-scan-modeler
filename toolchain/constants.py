@@ -10,14 +10,6 @@ SUPPORTED_BCS = (BC_GHOST_EXTRAP, BC_SLIP_WALL, BC_NO_SLIP_WALL, BC_DIRICHLET)
 # initial condition patch geometries
 ICPP_RECTANGLE = 3
 
-# immersed boundary geometries
-IB_STL_2D = 5
-IB_STL_3D = 12
-
-# image point interpolation
-IP_INTERP_BILINEAR = 2
-
-# time steppers and pressure solvers
-TIME_STEPPER_AB2_CN = 1
+# pressure solvers
 POISSON_SPARSE_LU = 1
 POISSON_SPECTRAL_KRYLOV = 2

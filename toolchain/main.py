@@ -22,7 +22,7 @@ def make_parser():
     parser = argparse.ArgumentParser(prog="./ctm.sh", description="CT scan modeler toolchain")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    run_parser = commands.add_parser("run", allow_abbrev=False, help="build case optimized and run a case, arguments after the case go to case.py")
+    run_parser = commands.add_parser("run", allow_abbrev=False, help="build case optimized and run a case")
     run_parser.add_argument("case_path", help="path to case.py")
     run_parser.add_argument("-n", "--num_gpus", type=int, default=1, help="number of GPUs, one MPI rank each")
     run_parser.add_argument("--hostfile", default=None, help="MPI hostfile for multinode runs outside Slurm")
@@ -39,12 +39,10 @@ def make_parser():
 
 
 def main():
-    arguments, extra_arguments = make_parser().parse_known_args()
-    if extra_arguments and arguments.command != "run":
-        sys.exit(f"ERROR :: unrecognized arguments: {' '.join(extra_arguments)}")
+    arguments = make_parser().parse_args()
     try:
         if arguments.command == "run":
-            run(arguments, extra_arguments)
+            run(arguments)
         elif arguments.command == "build":
             print(f"INFO :: installed {build(None, arguments.computer, arguments.jobs, arguments.debug, arguments.verbose)}")
         else:

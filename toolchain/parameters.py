@@ -16,7 +16,6 @@ LOGICAL, INTEGER, REAL, STRING = bool, int, float, str
 NUM_DIMS_MAX = 3
 NUM_PATCHES_MAX = 10
 NUM_IBS_MAX = 50
-NUM_STL_MODELS_MAX = 10
 
 # scalar parameters, names follow MFC where the meaning carries over
 SCALARS = {
@@ -40,8 +39,6 @@ SCALARS = {
     "t_step_save": Parameter(INTEGER, None, "time steps between field saves"),
     # simulation algorithm
     "num_patches": Parameter(INTEGER, 1, "number of initial condition patches"),
-    "num_fluids": Parameter(INTEGER, 1, "number of fluids, only 1 is supported"),
-    "time_stepper": Parameter(INTEGER, 1, "1 = AB2 convection with Crank-Nicolson diffusion"),
     "poisson_solver": Parameter(INTEGER, 1, "1 = sparse direct LU, 2 = GMRES with a spectral preconditioner (uniform grid)"),
     "krylov_tolerance": Parameter(REAL, 1.0e-10, "relative residual at which GMRES stops"),
     "krylov_restart": Parameter(INTEGER, 30, "GMRES restart length"),
@@ -50,8 +47,6 @@ SCALARS = {
     # immersed boundaries
     "ib": Parameter(LOGICAL, False, "enable immersed boundaries"),
     "num_ibs": Parameter(INTEGER, 0, "number of immersed boundary patches"),
-    "num_stl_models": Parameter(INTEGER, 0, "number of STL models"),
-    "ibm_ip_interpolation": Parameter(INTEGER, 2, "2 = bilinear, inverse distance fallback near solids"),
     "gp_layers": Parameter(INTEGER, 1, "neighbor search width that marks a solid cell as a ghost point"),
     # output
     "prim_vars_wrt": Parameter(LOGICAL, True, "write primitive variables at each save"),
@@ -71,7 +66,7 @@ for direction in "xyz":
 
 SCALARS["fluid_pp(1)%Re(1)"] = Parameter(REAL, 0.0, "shear Reynolds number, the inverse kinematic viscosity")
 
-# indexed families, e.g. patch_ib(2)%model_id
+# indexed families, e.g. patch_ib(2)%geometry
 FAMILIES = {
     "patch_icpp": (NUM_PATCHES_MAX, {
         "geometry": Parameter(INTEGER, 3, "3 = rectangle"),
@@ -87,19 +82,15 @@ FAMILIES = {
         "pres": Parameter(REAL, 0.0, "initial kinematic pressure"),
     }),
     "patch_ib": (NUM_IBS_MAX, {
-        "geometry": Parameter(INTEGER, 5, "5 = 2D STL, 12 = 3D STL"),
-        "model_id": Parameter(INTEGER, 1, "index into stl_models"),
+        "geometry": Parameter(STRING, None, "STL path, relative to case_dir; a flat STL in 2D"),
         "slip": Parameter(LOGICAL, False, "slip wall, only no-slip is supported"),
-        "x_centroid": Parameter(REAL, 0.0, "torque reference point in x"),
-        "y_centroid": Parameter(REAL, 0.0, "torque reference point in y"),
-        "z_centroid": Parameter(REAL, 0.0, "torque reference point in z"),
-    }),
-    "stl_models": (NUM_STL_MODELS_MAX, {
-        "model_filepath": Parameter(STRING, None, "STL path, relative to case_dir"),
         "model_threshold": Parameter(REAL, 0.5, "winding number above which a cell is solid"),
         **{f"model_scale({k})": Parameter(REAL, 1.0, "model scale") for k in range(1, 4)},
         **{f"model_translate({k})": Parameter(REAL, 0.0, "model translation") for k in range(1, 4)},
         **{f"model_rotate({k})": Parameter(REAL, 0.0, "model rotation in radians") for k in range(1, 4)},
+        "x_centroid": Parameter(REAL, 0.0, "torque reference point in x"),
+        "y_centroid": Parameter(REAL, 0.0, "torque reference point in y"),
+        "z_centroid": Parameter(REAL, 0.0, "torque reference point in z"),
     }),
 }
 
@@ -120,5 +111,4 @@ def lookup(name):
 
 
 # parameters compiled in as constants by a case optimized build, changing any of them triggers a rebuild
-CASE_OPTIMIZATION = ("m", "n", "p", "num_fluids", "time_stepper", "poisson_solver", "viscous", "ib", "num_ibs",
-                     "num_stl_models", "ibm_ip_interpolation", "gp_layers", "krylov_restart")
+CASE_OPTIMIZATION = ("m", "n", "p", "poisson_solver", "viscous", "ib", "num_ibs", "gp_layers", "krylov_restart")

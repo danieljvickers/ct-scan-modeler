@@ -3,10 +3,25 @@ build/
 __pycache__/
 .pytest_cache/
 
-# simulation output, keep the convergence summary
-examples/*/D/
-examples/*/convergence/*/
-examples/*/convergence_driver.log
+# simulation data: D directories, HDF5 saves, XDMF indices, and run logs
+D/
+*.h5
+*.xmf
+*.xmf.tmp
+*.log
+
+# images and movies
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.tif
+*.tiff
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
 
 # toolchain generated solver input
-examples/*/simulation.json
+examples/*/simulation.inp

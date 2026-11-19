@@ -1,6 +1,7 @@
 """Incremental pressure correction on a collocated grid with face velocities.
 
 Projection: Kim & Moin (1985) with the incremental pressure form of Van Kan (1986).
+Runge-Kutta stages with Crank-Nicolson diffusion and a projection per stage: Le & Moin (1991).
 Collocated face velocities: Zang, Street & Koseff (1994), used with ghost cells by Ye et al. (1999).
 """
 
@@ -14,9 +15,12 @@ from prototype.operators import DIRECTIONS, sum_over_directions
 
 VELOCITIES = ("u", "v")
 
+# (gamma, zeta, alpha) per stage: convection weights for this and the previous stage, and the stage time fraction
+RK1_STAGES = ((1.0, 0.0, 1.0),)
+
 
 class FractionalStepSolver:
-    """AB2 convection, Crank-Nicolson diffusion, and an IB aware pressure Poisson solve."""
+    """Runge-Kutta convection, Crank-Nicolson diffusion, and an IB aware pressure Poisson solve each stage."""
 
     def __init__(self, case, grid, operators, immersed_boundaries, halos):
         self.case = case
@@ -27,14 +31,16 @@ class FractionalStepSolver:
         self.dt = case["dt"]
         self.kinematic_viscosity = 1.0/case["fluid_pp(1)%Re(1)"] if case["viscous"] else 0.0
         self.laplacians = {variable: operators.laplacian(variable) for variable in VELOCITIES}
-        self.previous_convection = None
+        self.stages = RK1_STAGES
 
-        # velocity Helmholtz systems, built once since dt and viscosity are fixed
+        # velocity Helmholtz systems per stage, built once since dt and viscosity are fixed
         identity = host_sparse.identity(grid.num_cells, format="csr")
-        diffusion_number = 0.5*self.dt*self.kinematic_viscosity
-        self.helmholtz_solvers = {variable: self._build_solver(identity - diffusion_number*operators.host_laplacian(variable)[0],
-                                                               variable, shift=1.0, scale=-diffusion_number, ghost_sign=1.0)
-                                  for variable in VELOCITIES}
+        self.helmholtz_solvers = []
+        for _, _, alpha in self.stages:
+            diffusion_number = 0.5*alpha*self.dt*self.kinematic_viscosity
+            self.helmholtz_solvers.append({variable: self._build_solver(identity - diffusion_number*operators.host_laplacian(variable)[0],
+                                                                        variable, shift=1.0, scale=-diffusion_number, ghost_sign=1.0)
+                                           for variable in VELOCITIES})
 
         # pressure Poisson system with a zero normal pressure gradient mirrored into the ghost cells
         poisson_matrix = sum_over_directions(operators.host_divergence[d] @ operators.host_face["phi"][d].gradient for d in DIRECTIONS)
@@ -60,19 +66,19 @@ class FractionalStepSolver:
                             self.case["krylov_max_iterations"])
 
     def last_iterations(self):
-        """Krylov iterations of the last u, v, and pressure solves."""
-        return [self.helmholtz_solvers[variable].last_iterations for variable in VELOCITIES] + [self.poisson_solver.last_iterations]
+        """Krylov iterations of the last stage's u, v, and pressure solves."""
+        return [self.helmholtz_solvers[-1][variable].last_iterations for variable in VELOCITIES] + [self.poisson_solver.last_iterations]
 
-    def _project(self, predicted_velocities, predicted_face_velocities):
+    def _project(self, predicted_velocities, predicted_face_velocities, stage_dt):
         """Solve for the pressure correction and make the face velocities divergence free."""
-        rhs = self.operators.face_divergence(predicted_face_velocities)/self.dt
+        rhs = self.operators.face_divergence(predicted_face_velocities)/stage_dt
         if self.ib is not None:
             rhs[~self.ib.is_fluid] = 0.0
         pressure_correction = self.poisson_solver.solve(rhs, initial_guess=self.pressure_correction)
         self.pressure_correction = pressure_correction
 
-        face_velocities = {d: predicted_face_velocities[d] - self.dt*self.operators.face["phi"][d].face_gradient(pressure_correction) for d in DIRECTIONS}
-        velocities = {variable: predicted_velocities[variable] - self.dt*self.operators.cell_gradient("phi", pressure_correction, d)
+        face_velocities = {d: predicted_face_velocities[d] - stage_dt*self.operators.face["phi"][d].face_gradient(pressure_correction) for d in DIRECTIONS}
+        velocities = {variable: predicted_velocities[variable] - stage_dt*self.operators.cell_gradient("phi", pressure_correction, d)
                       for variable, d in zip(VELOCITIES, DIRECTIONS)}
         if self.ib is not None:
             for variable in VELOCITIES:
@@ -85,38 +91,43 @@ class FractionalStepSolver:
             for variable in VELOCITIES:
                 self.ib.apply_ghost_velocity(velocities[variable])
         face_velocities = {d: self.operators.face[variable][d].interpolate(velocities[variable]) for variable, d in zip(VELOCITIES, DIRECTIONS)}
-        velocities, face_velocities, _ = self._project(velocities, face_velocities)
+        velocities, face_velocities, _ = self._project(velocities, face_velocities, self.dt)
         return velocities, face_velocities, pressure
 
-    def step(self, velocities, face_velocities, pressure):
-        """Advance one time step and return the new velocities, face velocities, and pressure."""
-        dt, operators = self.dt, self.operators
-
-        # explicit convection, Euler on the first step and AB2 after
+    def _stage(self, stage_index, velocities, face_velocities, pressure, previous_convection):
+        """One Runge-Kutta stage: explicit convection, Crank-Nicolson predictor, projection."""
+        gamma, zeta, alpha = self.stages[stage_index]
+        dt, stage_dt, operators = self.dt, alpha*self.dt, self.operators
         convection = {variable: operators.convection(variable, velocities[variable], face_velocities) for variable in VELOCITIES}
-        previous_convection = convection if self.previous_convection is None else self.previous_convection
-        self.previous_convection = convection
 
         # get tentative velocity with the old pressure gradient
         predicted = {}
         for variable, d in zip(VELOCITIES, DIRECTIONS):
             laplacian, laplacian_offset = self.laplacians[variable]
-            rhs = (velocities[variable] - dt*(1.5*convection[variable] - 0.5*previous_convection[variable])
-                   - dt*operators.cell_gradient("p", pressure, d)
-                   + 0.5*dt*self.kinematic_viscosity*(laplacian @ velocities[variable]) + dt*self.kinematic_viscosity*laplacian_offset)
+            explicit_convection = gamma*convection[variable] + (zeta*previous_convection[variable] if zeta != 0.0 else 0.0)
+            rhs = (velocities[variable] - dt*explicit_convection - stage_dt*operators.cell_gradient("p", pressure, d)
+                   + 0.5*stage_dt*self.kinematic_viscosity*(laplacian @ velocities[variable]) + stage_dt*self.kinematic_viscosity*laplacian_offset)
             if self.ib is not None:
                 rhs[~self.ib.is_fluid] = 0.0  # stationary no-slip wall
-            predicted[variable] = self.helmholtz_solvers[variable].solve(rhs, initial_guess=velocities[variable])
+            predicted[variable] = self.helmholtz_solvers[stage_index][variable].solve(rhs, initial_guess=velocities[variable])
 
         # face velocities with the cell pressure gradient swapped for the compact face gradient
         predicted_faces = {}
         for variable, d in zip(VELOCITIES, DIRECTIONS):
             pressure_smoothing = (operators.face["neumann"][d].interpolate(operators.cell_gradient("p", pressure, d))
                                   - operators.face["p"][d].face_gradient(pressure))
-            predicted_faces[d] = operators.face[variable][d].interpolate(predicted[variable]) + dt*self.fluid_faces[d]*pressure_smoothing
+            predicted_faces[d] = operators.face[variable][d].interpolate(predicted[variable]) + stage_dt*self.fluid_faces[d]*pressure_smoothing
 
-        velocities, face_velocities, pressure_correction = self._project(predicted, predicted_faces)
-        return velocities, face_velocities, pressure + pressure_correction
+        velocities, face_velocities, pressure_correction = self._project(predicted, predicted_faces, stage_dt)
+        return velocities, face_velocities, pressure + pressure_correction, convection
+
+    def step(self, velocities, face_velocities, pressure):
+        """Advance one time step through every Runge-Kutta stage."""
+        previous_convection = None
+        for stage_index in range(len(self.stages)):
+            velocities, face_velocities, pressure, previous_convection = self._stage(stage_index, velocities, face_velocities, pressure,
+                                                                                     previous_convection)
+        return velocities, face_velocities, pressure
 
     def max_fluid_divergence(self, face_velocities):
         divergence = self.operators.face_divergence(face_velocities)

@@ -6,7 +6,8 @@ from prototype.model import Model2D
 
 
 def load_models(case):
-    return [Model2D(case.family("stl_models", model_id), case["case_dir"]) for model_id in range(1, case["num_stl_models"] + 1)]
+    """One model per immersed boundary patch."""
+    return [Model2D(case.family("patch_ib", patch_id), case["case_dir"]) for patch_id in range(1, case["num_ibs"] + 1)]
 
 
 def compute_ib_markers(case, grid, models):
@@ -14,7 +15,7 @@ def compute_ib_markers(case, grid, models):
     ib_markers = np.zeros(grid.shape, dtype=np.int32)
     x_cc, y_cc = grid.cell_centers()
     for patch_id in range(1, case["num_ibs"] + 1):
-        model = models[case.family("patch_ib", patch_id)["model_id"] - 1]
+        model = models[patch_id - 1]
 
         # only test cells inside the model bounding box
         candidates = ((x_cc >= model.bounding_box[0, 0]) & (x_cc <= model.bounding_box[1, 0]) &

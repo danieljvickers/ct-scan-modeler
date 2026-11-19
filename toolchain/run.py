@@ -4,12 +4,13 @@ import os
 import shutil
 import subprocess
 
+from toolchain import constants
 from toolchain.build import build
 from toolchain.case import load_case
 from toolchain.case_validator import validate_case
 from toolchain.computers import load_environment
 
-INPUT_FILENAME = "simulation.json"
+INPUT_FILENAME = "simulation.inp"
 
 
 def launch_command(num_gpus, hostfile, environment):
@@ -22,10 +23,11 @@ def launch_command(num_gpus, hostfile, environment):
     return command + ["--hostfile", hostfile] if hostfile else command
 
 
-def run(arguments, case_arguments):
+def run(arguments):
     assert arguments.num_gpus >= 1, "ERROR :: -n must be at least 1"
-    case = load_case(arguments.case_path, case_arguments)
+    case = load_case(arguments.case_path)
     validate_case(case)
+    assert case["poisson_solver"] == constants.POISSON_SPECTRAL_KRYLOV, "ERROR :: the CUDA solver needs poisson_solver = 2 on a uniform grid"
 
     executable = build(None if arguments.no_case_optimization else case, arguments.computer, arguments.jobs, arguments.debug,
                        arguments.verbose)
@@ -33,7 +35,7 @@ def run(arguments, case_arguments):
     # write the validated, default filled case next to case.py for the solver to read
     input_path = os.path.join(case["case_dir"], INPUT_FILENAME)
     with open(input_path, "w") as input_file:
-        input_file.write(case.to_json())
+        input_file.write(case.to_input_file())
 
     environment = load_environment(arguments.computer)
     command = launch_command(arguments.num_gpus, arguments.hostfile, environment) + [executable, input_path]

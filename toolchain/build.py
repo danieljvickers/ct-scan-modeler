@@ -7,10 +7,9 @@ import shutil
 
 from toolchain import parameters
 from toolchain.computers import computer_name, load_environment
+from toolchain.dependencies import ensure_dependencies
+from toolchain.paths import BUILD_ROOT, REPO_ROOT
 from toolchain.progress import run_with_progress
-
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BUILD_ROOT = os.path.join(REPO_ROOT, "build")
 
 
 def _cpp_literal(value):
@@ -56,6 +55,7 @@ def build(case=None, computer=None, jobs=8, debug=False, verbose=False):
     for tool in ("cmake", "nvcc"):
         assert shutil.which(tool, path=environment.get("PATH")), f"ERROR :: {tool} not found, load a compiler environment with -c"
 
+    dependencies_dir = ensure_dependencies(computer, environment, jobs, verbose)
     configuration = build_configuration(case, computer, debug)
     slug = hashlib.sha256(json.dumps(configuration, sort_keys=True).encode()).hexdigest()[:10]
     staging_dir = os.path.join(BUILD_ROOT, "staging", slug)
@@ -70,7 +70,8 @@ def build(case=None, computer=None, jobs=8, debug=False, verbose=False):
     configure_command = ["cmake", "-S", REPO_ROOT, "-B", staging_dir, f"-DCMAKE_BUILD_TYPE={configuration['build_type']}",
                          f"-DCMAKE_INSTALL_PREFIX={install_dir}",
                          f"-DCMAKE_CUDA_ARCHITECTURES={environment.get('CTM_CUDA_ARCHITECTURES', 'native')}",
-                         f"-DCTM_CASE_OPTIMIZATION={'ON' if case is not None else 'OFF'}", f"-DCTM_CASE_HEADER_DIR={header_dir}"]
+                         f"-DCTM_CASE_OPTIMIZATION={'ON' if case is not None else 'OFF'}", f"-DCTM_CASE_HEADER_DIR={header_dir}",
+                         f"-DHDF5_ROOT={dependencies_dir}"]
     run_with_progress(configure_command, "Configuring", environment, verbose)
     run_with_progress(["cmake", "--build", staging_dir, "--parallel", str(jobs)], "Building", environment, verbose)
     run_with_progress(["cmake", "--install", staging_dir], "Installing", environment, verbose)

@@ -94,7 +94,7 @@ class ImmersedBoundaries:
         normals = np.empty((len(cells), 2))
         for patch_id in range(1, self.num_ibs + 1):
             owned = patch_ids == patch_id
-            model = models[case.family("patch_ib", patch_id)["model_id"] - 1]
+            model = models[patch_id - 1]
             levelsets[owned], normals[owned] = model.levelset(centers[owned])
 
         # image point mirrors the ghost point across the surface
