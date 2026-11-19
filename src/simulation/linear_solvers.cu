@@ -50,6 +50,23 @@ __global__ void scatterLinesKernel(const cufftDoubleComplex* work, real* data, i
     data[(line/inner)*length*inner + line % inner + static_cast<long>(k)*inner] = sine ? -imaginary_part : real_part;
 }
 
+__global__ void gatherHartleyKernel(const real* data, cufftDoubleComplex* work, int length, long inner, long batch) {
+    const long element = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (element >= batch*length) return;
+    const long line = element/length;
+    const int n = static_cast<int>(element % length);
+    work[element] = {data[(line/inner)*length*inner + line % inner + static_cast<long>(n)*inner], 0.0};
+}
+
+// Re(F) - Im(F) of the forward FFT is the sum with cos + sin
+__global__ void scatterHartleyKernel(const cufftDoubleComplex* work, real* data, int length, long inner, long batch) {
+    const long element = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (element >= batch*length) return;
+    const long line = element/length;
+    const int k = static_cast<int>(element % length);
+    data[(line/inner)*length*inner + line % inner + static_cast<long>(k)*inner] = work[element].x - work[element].y;
+}
+
 // pencils [row][axis]: divide by the eigenvalue of shift + scale*laplacian and fold in the basis norms
 __global__ void divideEigenvaluesKernel(GridView grid, real* pencils, int local_rows, int row_offset, int axis_cells, real shift, real scale,
                                         const real* eigenvalues_x, const real* eigenvalues_y, const real* eigenvalues_z,
@@ -68,7 +85,8 @@ __global__ void divideEigenvaluesKernel(GridView grid, real* pencils, int local_
         eigenvalue = eigenvalues_x[x] + eigenvalues_y[y] + eigenvalues_z[axis_index];
         norm = norms_x[x]*norms_y[y]*norms_z[axis_index];
     }
-    pencils[element] *= norm/(shift + scale*eigenvalue);
+    const real operator_eigenvalue = shift + scale*eigenvalue;
+    pencils[element] *= operator_eigenvalue == 0.0 ? 0.0 : norm/operator_eigenvalue;  // a fully periodic Poisson problem drops its constant mode
 }
 
 }  // namespace
@@ -97,6 +115,25 @@ void LineTransforms::apply(real* data, int length, long outer, long inner, real 
     CUDA_CHECK(cudaGetLastError());
 }
 
+void LineTransforms::applyHartley(real* data, int length, long outer, long inner) {
+    const long batch = outer*inner;
+    if (this->work.size() < batch*length) this->work.resize(batch*length);
+    gatherHartleyKernel<<<numBlocks(batch*length), block_size>>>(data, this->work.data(), length, inner, batch);
+    CUFFT_CHECK(cufftExecZ2Z(this->plan(length, batch), this->work.data(), this->work.data(), CUFFT_FORWARD));
+    scatterHartleyKernel<<<numBlocks(batch*length), block_size>>>(this->work.data(), data, length, inner, batch);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void SpectralSolver::transformAxis(real* data, int length, long outer, long inner, int axis, bool inverse) {
+    if (this->hartley[axis]) {
+        this->transforms.applyHartley(data, length, outer, inner);  // its own inverse up to the norm in the divide
+        return;
+    }
+    const real wave_shift = inverse ? this->sample_shift[axis] : this->wave_shift[axis];
+    const real sample_shift = inverse ? this->wave_shift[axis] : this->sample_shift[axis];
+    this->transforms.apply(data, length, outer, inner, wave_shift, sample_shift, this->sine[axis]);
+}
+
 SpectralSolver::SpectralSolver(const GridView& grid, SlabTranspose& transpose, LineTransforms& transforms, const HaloRule& rule,
                                real shift, real scale)
     : grid(grid), transpose(transpose), transforms(transforms), shift(shift), scale(scale) {
@@ -104,7 +141,14 @@ SpectralSolver::SpectralSolver(const GridView& grid, SlabTranspose& transpose, L
         const int length = grid.global_cells[d];
         std::vector<real> eigenvalues(length, 0.0), norms(length, 1.0);
         transformShifts(rule.coefficient[d][0], rule.coefficient[d][1], this->wave_shift[d], this->sample_shift[d], this->sine[d]);
-        if (d < grid.num_dims) {
+        this->hartley[d] = grid.periodic[d];
+        if (this->hartley[d]) {
+            for (int k = 0; k < length; ++k) {
+                const real angle = pi*k/length;
+                eigenvalues[k] = -(4.0/(grid.spacing[d]*grid.spacing[d]))*std::sin(angle)*std::sin(angle);
+                norms[k] = 1.0/length;
+            }
+        } else if (d < grid.num_dims) {
             for (int k = 0; k < length; ++k) {
                 const real angle = pi*(k + this->wave_shift[d])/(2.0*length);
                 eigenvalues[k] = -(4.0/(grid.spacing[d]*grid.spacing[d]))*std::sin(angle)*std::sin(angle);
@@ -127,13 +171,11 @@ void SpectralSolver::solve(const real* rhs, real* solution) {
     // forward along the local axes of the compact layout [z][y][x], then along the decomposed axis as pencils
     for (int d = 0; d < axis; ++d) {
         const long inner = d == 0 ? 1 : g.cells[0];
-        this->transforms.apply(this->compact.data(), g.cells[d], g.numOwned()/(g.cells[d]*inner), inner, this->wave_shift[d],
-                               this->sample_shift[d], this->sine[d]);
+        this->transformAxis(this->compact.data(), g.cells[d], g.numOwned()/(g.cells[d]*inner), inner, d, false);
     }
     this->transpose.toPencils(this->compact.data(), this->pencils.data());
     const int axis_cells = this->transpose.axis_cells;
-    this->transforms.apply(this->pencils.data(), axis_cells, this->transpose.local_rows, 1, this->wave_shift[axis], this->sample_shift[axis],
-                           this->sine[axis]);
+    this->transformAxis(this->pencils.data(), axis_cells, this->transpose.local_rows, 1, axis, false);
 
     divideEigenvaluesKernel<<<numBlocks(static_cast<long>(this->transpose.local_rows)*axis_cells), block_size>>>(
         g, this->pencils.data(), this->transpose.local_rows, this->transpose.row_offset, axis_cells, this->shift, this->scale,
@@ -142,13 +184,11 @@ void SpectralSolver::solve(const real* rhs, real* solution) {
     CUDA_CHECK(cudaGetLastError());
 
     // the inverse swaps the wave and sample shifts, then retraces the same axes in reverse
-    this->transforms.apply(this->pencils.data(), axis_cells, this->transpose.local_rows, 1, this->sample_shift[axis], this->wave_shift[axis],
-                           this->sine[axis]);
+    this->transformAxis(this->pencils.data(), axis_cells, this->transpose.local_rows, 1, axis, true);
     this->transpose.toSlabs(this->pencils.data(), this->compact.data());
     for (int d = axis - 1; d >= 0; --d) {
         const long inner = d == 0 ? 1 : g.cells[0];
-        this->transforms.apply(this->compact.data(), g.cells[d], g.numOwned()/(g.cells[d]*inner), inner, this->sample_shift[d],
-                               this->wave_shift[d], this->sine[d]);
+        this->transformAxis(this->compact.data(), g.cells[d], g.numOwned()/(g.cells[d]*inner), inner, d, true);
     }
     CUDA_CHECK(cudaMemcpy(solution, this->compact.data(), g.numOwned()*sizeof(real), cudaMemcpyDeviceToDevice));
 }

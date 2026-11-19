@@ -48,8 +48,9 @@ void run(const char* input_path) {
     real setup_start = MPI_Wtime();
     ImmersedBoundaries immersed_boundaries(parameters, grid);
     if (is_root && parameters.ib)
-        std::printf("INFO :: %ld ghost points, %ld bilinear and the rest inverse distance\n", immersed_boundaries.geometry.global_ghost_points,
-                    immersed_boundaries.geometry.global_bilinear);
+        std::printf("INFO :: %ld ghost points, %ld bilinear, %ld from their own neighbors, the rest inverse distance; %ld sealed fluid cells filled\n",
+                    immersed_boundaries.geometry.global_ghost_points, immersed_boundaries.geometry.global_bilinear,
+                    immersed_boundaries.geometry.global_fallback, immersed_boundaries.geometry.global_trapped);
     FlowSolver solver(parameters, grid, immersed_boundaries);
     Output output(parameters, grid, immersed_boundaries);
     solver.initialize();

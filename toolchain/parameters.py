@@ -69,7 +69,10 @@ SCALARS["fluid_pp(1)%Re(1)"] = Parameter(REAL, 0.0, "shear Reynolds number, the 
 # indexed families, e.g. patch_ib(2)%geometry
 FAMILIES = {
     "patch_icpp": (NUM_PATCHES_MAX, {
-        "geometry": Parameter(INTEGER, 3, "3 = rectangle"),
+        "geometry": Parameter(INTEGER, 3, "3 = rectangle, 7 = hardcoded 2D field chosen by hcid"),
+        "hcid": Parameter(INTEGER, 0, "hardcoded field id: 201 = Gaussian vortex"),
+        "radius": Parameter(REAL, 0.0, "hardcoded vortex radius R"),
+        "vortex_velocity": Parameter(REAL, 0.0, "hardcoded vortex peak swirl velocity V at r = R"),
         "x_centroid": Parameter(REAL, 0.0, "patch center in x"),
         "y_centroid": Parameter(REAL, 0.0, "patch center in y"),
         "z_centroid": Parameter(REAL, 0.0, "patch center in z"),

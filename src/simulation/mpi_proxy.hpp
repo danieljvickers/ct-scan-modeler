@@ -6,11 +6,14 @@
 
 #include "grid.hpp"
 
+// device pointers go straight to MPI when it is CUDA aware, GPU to GPU over peer access; CTM_CUDA_AWARE_MPI=0 forces host staging
+bool useCudaAwareMpi();
+
 real allreduceSum(real value);
 real allreduceMax(real value);
 void allreduceSum(real* values, int count);
 
-// swaps the halo planes along the decomposed axis with the neighbor ranks, staged through pinned host memory
+// swaps the halo planes along the decomposed axis with the neighbor ranks, device to device or staged through pinned host memory
 class HaloExchange {
 public:
     explicit HaloExchange(const GridView& grid);
@@ -20,6 +23,7 @@ public:
 private:
     GridView grid;
     long plane_size;  // elements in one storage plane normal to the decomposed axis
+    bool cuda_aware;
     real* send_lower = nullptr;
     real* send_upper = nullptr;
     real* receive_lower = nullptr;
@@ -42,6 +46,8 @@ public:
 
 private:
     int num_ranks, rank, slab_cells, slab_offset;
+    bool cuda_aware;
+    void exchange(const real* send, real* receive, long send_elements, long receive_elements, bool to_pencils);
     std::vector<int> send_counts, send_displacements, receive_counts, receive_displacements;
     DeviceArray<real> device_send, device_receive;
     DeviceArray<int> device_slab_offsets, device_slab_counts, device_receive_displacements;

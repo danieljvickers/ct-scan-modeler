@@ -13,13 +13,22 @@
 
 // boundary condition flags, values match MFC
 enum BoundaryCondition : int {
+    bc_periodic = -1,             // wraps to the opposite side
     bc_ghost_extrapolation = -3,  // outflow: zero normal velocity gradient, zero pressure
     bc_slip_wall = -15,           // zero normal velocity, zero tangential gradient
     bc_no_slip_wall = -16,        // zero velocity
     bc_dirichlet = -17,           // inflow at bc_%vel_in, zero pressure gradient
 };
 
+// initial condition patch geometries and hardcoded fields, values match the toolchain constants
+enum PatchGeometry : int { patch_rectangle = 3, patch_hardcoded_2d = 7 };
+enum HardcodedField : int { hcid_gaussian_vortex = 201 };
+
 struct InitialPatch {
+    int geometry;
+    int hcid;
+    real radius;           // Gaussian vortex radius R
+    real vortex_velocity;  // Gaussian vortex peak swirl V at r = R
     real centroid[max_dims];
     real length[max_dims];
     real velocity[max_dims];

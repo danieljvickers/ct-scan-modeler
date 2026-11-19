@@ -24,3 +24,6 @@ export CTM_CUDA_ARCHITECTURES=80  # A100
 # no InfiniBand: disable HPC-X collectives and the PMIx shared memory store, which fail without it
 export OMPI_MCA_coll_hcoll_enable=0
 export PMIX_MCA_gds=hash
+
+# CUDA aware all to all hangs on the 1.5M cell shedding case, stage MPI through host memory until that is understood
+export CTM_CUDA_AWARE_MPI=0

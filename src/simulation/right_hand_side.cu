@@ -22,6 +22,18 @@ __global__ void initialConditionKernel(GridView grid, InitialPatches initial, re
     real* velocity[max_dims] = {velocity_x, velocity_y, velocity_z};
     for (int p = 0; p < initial.count; ++p) {
         const InitialPatch& patch = initial.patches[p];
+
+        // shielded Gaussian vortex on the patch velocity, pressure from the cyclostrophic balance dp/dr = u_theta^2/r
+        if (patch.geometry == patch_hardcoded_2d && patch.hcid == hcid_gaussian_vortex) {
+            const real x = grid.center(0, index[0]) - patch.centroid[0], y = grid.center(1, index[1]) - patch.centroid[1];
+            const real radius_squared = (x*x + y*y)/(patch.radius*patch.radius);
+            const real swirl = patch.vortex_velocity/patch.radius*exp(0.5*(1.0 - radius_squared));
+            velocity[0][cell] = patch.velocity[0] - swirl*y;
+            velocity[1][cell] = patch.velocity[1] + swirl*x;
+            velocity[2][cell] = 0.0;
+            pressure[cell] = patch.pressure - 0.5*patch.vortex_velocity*patch.vortex_velocity*exp(1.0 - radius_squared);
+            continue;
+        }
         bool inside = true;
         for (int d = 0; d < numDims(grid); ++d) inside &= fabs(grid.center(d, index[d]) - patch.centroid[d]) <= 0.5*patch.length[d];
         if (!inside) continue;
@@ -147,7 +159,8 @@ __global__ void predictedFacesKernel(GridView grid, int direction, const real* p
     const long lower = upper - step;
     real value = 0.5*(predicted[lower] + predicted[upper]);
     const int global_face = grid.offset[direction] + index[direction];
-    const bool is_interior_fluid = global_face > 0 && global_face < grid.global_cells[direction] && markers[lower] == 0 && markers[upper] == 0;
+    const bool is_interior = grid.periodic[direction] || (global_face > 0 && global_face < grid.global_cells[direction]);
+    const bool is_interior_fluid = is_interior && markers[lower] == 0 && markers[upper] == 0;
     if (is_interior_fluid) {
         const real cell_gradient = 0.5*(centralGradient(grid, pressure, lower, direction) + centralGradient(grid, pressure, upper, direction));
         value += stage_dt*(cell_gradient - (pressure[upper] - pressure[lower])/grid.spacing[direction]);

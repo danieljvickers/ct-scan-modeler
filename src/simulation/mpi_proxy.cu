@@ -1,6 +1,20 @@
 #include "mpi_proxy.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+
+#include <mpi-ext.h>
+
+bool useCudaAwareMpi() {
+    const char* setting = std::getenv("CTM_CUDA_AWARE_MPI");
+    if (setting != nullptr && std::strcmp(setting, "0") == 0) return false;
+#if defined(MPIX_CUDA_AWARE_SUPPORT) && MPIX_CUDA_AWARE_SUPPORT
+    return MPIX_Query_cuda_support() == 1;
+#else
+    return false;
+#endif
+}
 
 real allreduceSum(real value) {
     real total;
@@ -18,7 +32,7 @@ void allreduceSum(real* values, int count) {
     MPI_Allreduce(MPI_IN_PLACE, values, count, mpi_real, MPI_SUM, MPI_COMM_WORLD);
 }
 
-HaloExchange::HaloExchange(const GridView& grid) : grid(grid) {
+HaloExchange::HaloExchange(const GridView& grid) : grid(grid), cuda_aware(useCudaAwareMpi()) {
     this->plane_size = grid.stride(grid.decomposed_axis);
     const size_t bytes = halo_width*this->plane_size*sizeof(real);
     CUDA_CHECK(cudaMallocHost(&this->send_lower, bytes));
@@ -35,10 +49,14 @@ HaloExchange::~HaloExchange() {
 }
 
 void HaloExchange::exchange(real* field) {
-    if (mpiSize() == 1) return;
     const int axis = this->grid.decomposed_axis;
-    const int lower_rank = this->grid.lower_boundary[axis] ? MPI_PROC_NULL : mpiRank() - 1;
-    const int upper_rank = this->grid.upper_boundary[axis] ? MPI_PROC_NULL : mpiRank() + 1;
+    const int num_ranks = mpiSize(), rank = mpiRank();
+    if (num_ranks == 1 && !this->grid.periodic[axis]) return;
+
+    // a periodic axis wraps the end ranks onto each other, a single rank sends to itself
+    const bool is_periodic = this->grid.periodic[axis];
+    const int lower_rank = is_periodic ? (rank - 1 + num_ranks) % num_ranks : this->grid.lower_boundary[axis] ? MPI_PROC_NULL : rank - 1;
+    const int upper_rank = is_periodic ? (rank + 1) % num_ranks : this->grid.upper_boundary[axis] ? MPI_PROC_NULL : rank + 1;
     const long count = halo_width*this->plane_size;
     const size_t bytes = count*sizeof(real);
     const int cells = this->grid.cells[axis];
@@ -48,6 +66,12 @@ void HaloExchange::exchange(real* field) {
     real* last_owned = field + cells*this->plane_size;
     real* lower_halo = field;
     real* upper_halo = field + (cells + halo_width)*this->plane_size;
+    if (this->cuda_aware) {
+        CUDA_CHECK(cudaDeviceSynchronize());  // MPI reads the device planes outside the stream order
+        MPI_Sendrecv(last_owned, count, mpi_real, upper_rank, 0, lower_halo, count, mpi_real, lower_rank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Sendrecv(first_owned, count, mpi_real, lower_rank, 1, upper_halo, count, mpi_real, upper_rank, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        return;
+    }
     if (upper_rank != MPI_PROC_NULL) CUDA_CHECK(cudaMemcpy(this->send_upper, last_owned, bytes, cudaMemcpyDeviceToHost));
     if (lower_rank != MPI_PROC_NULL) CUDA_CHECK(cudaMemcpy(this->send_lower, first_owned, bytes, cudaMemcpyDeviceToHost));
     MPI_Sendrecv(this->send_upper, count, mpi_real, upper_rank, 0, this->receive_lower, count, mpi_real, lower_rank, 0,
@@ -104,7 +128,7 @@ __global__ void unpackSlabsKernel(const real* receive, real* compact, long num_r
 
 }  // namespace
 
-SlabTranspose::SlabTranspose(const GridView& grid) {
+SlabTranspose::SlabTranspose(const GridView& grid) : cuda_aware(useCudaAwareMpi()) {
     const int axis = grid.decomposed_axis;
     this->num_ranks = mpiSize();
     this->rank = mpiRank();
@@ -142,6 +166,27 @@ SlabTranspose::SlabTranspose(const GridView& grid) {
     CUDA_CHECK(cudaMallocHost(&this->host_receive, std::max(slab_elements, pencil_elements)*sizeof(real)));
 }
 
+// all to all of the packed buffers, device to device when MPI is CUDA aware, otherwise staged through pinned host memory
+void SlabTranspose::exchange(const real* send, real* receive, long send_elements, long receive_elements, bool to_pencils) {
+    const int* send_counts = to_pencils ? this->send_counts.data() : this->receive_counts.data();
+    const int* send_displacements = to_pencils ? this->send_displacements.data() : this->receive_displacements.data();
+    const int* receive_counts = to_pencils ? this->receive_counts.data() : this->send_counts.data();
+    const int* receive_displacements = to_pencils ? this->receive_displacements.data() : this->send_displacements.data();
+    if (this->num_ranks == 1) {
+        CUDA_CHECK(cudaMemcpy(receive, send, send_elements*sizeof(real), cudaMemcpyDeviceToDevice));  // nothing leaves the GPU
+        return;
+    }
+    if (this->cuda_aware) {
+        CUDA_CHECK(cudaDeviceSynchronize());  // the pack kernel must finish before MPI reads its buffer
+        MPI_Alltoallv(send, send_counts, send_displacements, mpi_real, receive, receive_counts, receive_displacements, mpi_real, MPI_COMM_WORLD);
+        return;
+    }
+    CUDA_CHECK(cudaMemcpy(this->host_send, send, send_elements*sizeof(real), cudaMemcpyDeviceToHost));
+    MPI_Alltoallv(this->host_send, send_counts, send_displacements, mpi_real, this->host_receive, receive_counts, receive_displacements,
+                  mpi_real, MPI_COMM_WORLD);
+    CUDA_CHECK(cudaMemcpy(receive, this->host_receive, receive_elements*sizeof(real), cudaMemcpyHostToDevice));
+}
+
 SlabTranspose::~SlabTranspose() {
     cudaFreeHost(this->host_send);
     cudaFreeHost(this->host_receive);
@@ -151,10 +196,7 @@ void SlabTranspose::toPencils(const real* compact, real* pencils) {
     const long slab_elements = static_cast<long>(this->num_rows)*this->slab_cells;
     const long pencil_elements = static_cast<long>(this->local_rows)*this->axis_cells;
     packSlabsKernel<<<numBlocks(slab_elements), block_size>>>(compact, this->device_send.data(), this->num_rows, this->slab_cells);
-    CUDA_CHECK(cudaMemcpy(this->host_send, this->device_send.data(), slab_elements*sizeof(real), cudaMemcpyDeviceToHost));
-    MPI_Alltoallv(this->host_send, this->send_counts.data(), this->send_displacements.data(), mpi_real, this->host_receive,
-                  this->receive_counts.data(), this->receive_displacements.data(), mpi_real, MPI_COMM_WORLD);
-    CUDA_CHECK(cudaMemcpy(this->device_receive.data(), this->host_receive, pencil_elements*sizeof(real), cudaMemcpyHostToDevice));
+    this->exchange(this->device_send.data(), this->device_receive.data(), slab_elements, pencil_elements, true);
     unpackPencilsKernel<<<numBlocks(pencil_elements), block_size>>>(this->device_receive.data(), pencils, this->local_rows, this->axis_cells,
                                                                     this->num_ranks, this->device_slab_offsets.data(),
                                                                     this->device_slab_counts.data(), this->device_receive_displacements.data());
@@ -167,10 +209,7 @@ void SlabTranspose::toSlabs(const real* pencils, real* compact) {
     packPencilsKernel<<<numBlocks(pencil_elements), block_size>>>(pencils, this->device_send.data(), this->local_rows, this->axis_cells,
                                                                   this->num_ranks, this->device_slab_offsets.data(),
                                                                   this->device_slab_counts.data(), this->device_receive_displacements.data());
-    CUDA_CHECK(cudaMemcpy(this->host_send, this->device_send.data(), pencil_elements*sizeof(real), cudaMemcpyDeviceToHost));
-    MPI_Alltoallv(this->host_send, this->receive_counts.data(), this->receive_displacements.data(), mpi_real, this->host_receive,
-                  this->send_counts.data(), this->send_displacements.data(), mpi_real, MPI_COMM_WORLD);
-    CUDA_CHECK(cudaMemcpy(this->device_receive.data(), this->host_receive, slab_elements*sizeof(real), cudaMemcpyHostToDevice));
+    this->exchange(this->device_send.data(), this->device_receive.data(), pencil_elements, slab_elements, false);
     unpackSlabsKernel<<<numBlocks(slab_elements), block_size>>>(this->device_receive.data(), compact, this->num_rows, this->slab_cells);
     CUDA_CHECK(cudaGetLastError());
 }

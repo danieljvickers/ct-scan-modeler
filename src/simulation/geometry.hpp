@@ -29,6 +29,11 @@ public:
     GhostPoints ghost_points;
     long global_ghost_points = 0;
     long global_bilinear = 0;              // ghost points whose stencil was all fluid
+    long global_fallback = 0;              // ghost points whose stencil was all solid, interpolated from their own fluid neighbors
+    long global_trapped = 0;               // sealed fluid cells turned solid
+
+private:
+    void fillTrappedFluid(const GridView& grid);
 };
 
 #endif

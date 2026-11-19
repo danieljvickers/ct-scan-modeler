@@ -35,8 +35,8 @@ __global__ void ghostRowsKernel(GridView grid, HaloRule rule, int num_ghost_poin
     for (int d = 0; d < numDims(grid); ++d) {
         const int global_index = index[d] + grid.offset[d];
         real diagonal = -2.0;
-        if (global_index == 0) diagonal += rule.coefficient[d][0];
-        if (global_index == grid.global_cells[d] - 1) diagonal += rule.coefficient[d][1];
+        if (!grid.periodic[d] && global_index == 0) diagonal += rule.coefficient[d][0];
+        if (!grid.periodic[d] && global_index == grid.global_cells[d] - 1) diagonal += rule.coefficient[d][1];
         laplacian_diagonal += diagonal/(grid.spacing[d]*grid.spacing[d]);
     }
 

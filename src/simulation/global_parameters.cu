@@ -54,6 +54,8 @@ Parameters readParameters(const std::string& path) {
         CTM_REQUIRE(!input.logical("stretch_" + name), "the CUDA solver needs a uniform grid, turn off stretch_%s", name.c_str());
         parameters.boundary[d][0] = input.integer("bc_" + name + "%beg");
         parameters.boundary[d][1] = input.integer("bc_" + name + "%end");
+        CTM_REQUIRE((parameters.boundary[d][0] == bc_periodic) == (parameters.boundary[d][1] == bc_periodic),
+                    "bc_%s%%beg and bc_%s%%end must both be periodic or neither", name.c_str(), name.c_str());
         for (int component = 0; component < max_dims; ++component)
             parameters.inflow_velocity[d][component] = input.number("bc_" + name + "%vel_in(" + std::to_string(component + 1) + ")");
     }
@@ -75,6 +77,12 @@ Parameters readParameters(const std::string& path) {
     for (int patch_id = 1; patch_id <= input.integer("num_patches"); ++patch_id) {
         const std::string prefix = "patch_icpp(" + std::to_string(patch_id) + ")%";
         InitialPatch patch;
+        patch.geometry = input.integer(prefix + "geometry");
+        patch.hcid = input.integer(prefix + "hcid");
+        patch.radius = input.number(prefix + "radius");
+        patch.vortex_velocity = input.number(prefix + "vortex_velocity");
+        CTM_REQUIRE(patch.geometry == patch_rectangle || (patch.geometry == patch_hardcoded_2d && patch.hcid == hcid_gaussian_vortex),
+                    "patch_icpp(%d) must be a rectangle or the hardcoded Gaussian vortex", patch_id);
         for (int d = 0; d < max_dims; ++d) {
             const std::string name = direction_names[d];
             patch.centroid[d] = input.number(prefix + name + "_centroid");

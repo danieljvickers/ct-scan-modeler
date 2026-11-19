@@ -17,8 +17,9 @@ struct GridView {
     int global_cells[max_dims];
     real origin[max_dims];            // domain begin
     real spacing[max_dims];           // cell width
-    bool lower_boundary[max_dims];    // this rank touches the physical begin
-    bool upper_boundary[max_dims];    // this rank touches the physical end
+    bool periodic[max_dims];          // the direction wraps around
+    bool lower_boundary[max_dims];    // this rank touches the physical begin, never true for a periodic direction
+    bool upper_boundary[max_dims];    // this rank touches the physical end, never true for a periodic direction
 
     // index of local cell (i, j, k) in a field with halos, negative indices reach into the halo
     __host__ __device__ long storageIndex(int i, int j, int k) const {

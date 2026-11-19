@@ -30,10 +30,36 @@ __global__ void fillSideKernel(GridView grid, real* field, int direction, int si
         coefficient*field[grid.storageIndex(interior_index[0], interior_index[1], interior_index[2])] + value;
 }
 
+// wrap the halo layers of a periodic axis held entirely by this rank
+__global__ void wrapSidesKernel(GridView grid, real* field, int direction) {
+    const int other_1 = (direction + 1) % max_dims, other_2 = (direction + 2) % max_dims;
+    const long plane = static_cast<long>(grid.storage[other_1])*grid.storage[other_2];
+    const long thread = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (thread >= plane*grid.halo[direction]) return;
+    const int layer = static_cast<int>(thread/plane);
+    const long within = thread % plane;
+    int index[max_dims];
+    index[other_1] = static_cast<int>(within % grid.storage[other_1]) - grid.halo[other_1];
+    index[other_2] = static_cast<int>(within/grid.storage[other_1]) - grid.halo[other_2];
+    const int cells = grid.cells[direction];
+    int source[max_dims] = {index[0], index[1], index[2]};
+    index[direction] = -1 - layer;
+    source[direction] = cells - 1 - layer;
+    field[grid.storageIndex(index[0], index[1], index[2])] = field[grid.storageIndex(source[0], source[1], source[2])];
+    index[direction] = cells + layer;
+    source[direction] = layer;
+    field[grid.storageIndex(index[0], index[1], index[2])] = field[grid.storageIndex(source[0], source[1], source[2])];
+}
+
 void fillPhysicalSides(const GridView& grid, const HaloRule& rule, real* field, int direction) {
     const int other_1 = (direction + 1) % max_dims, other_2 = (direction + 2) % max_dims;
     const long num_threads = static_cast<long>(grid.storage[other_1])*grid.storage[other_2]*grid.halo[direction];
     if (num_threads == 0) return;
+    if (grid.periodic[direction] && direction != grid.decomposed_axis) {
+        wrapSidesKernel<<<numBlocks(num_threads), block_size>>>(grid, field, direction);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     for (int side = 0; side < 2; ++side) {
         const bool is_physical = side == 0 ? grid.lower_boundary[direction] : grid.upper_boundary[direction];
         if (!is_physical) continue;
@@ -52,7 +78,9 @@ HaloRule makeHaloRule(const Parameters& parameters, FieldKind kind) {
             const int boundary = parameters.boundary[d][side];
             const bool is_velocity = kind != field_pressure;
             const bool is_normal = kind == d;
-            if (boundary == bc_dirichlet) {
+            if (boundary == bc_periodic) {
+                setSide(rule, d, side, neumann, 0.0);  // unused, periodic halos are copied
+            } else if (boundary == bc_dirichlet) {
                 is_velocity ? setSide(rule, d, side, dirichlet, parameters.inflow_velocity[d][kind]) : setSide(rule, d, side, neumann, 0.0);
             } else if (boundary == bc_ghost_extrapolation) {
                 is_velocity ? setSide(rule, d, side, neumann, 0.0) : setSide(rule, d, side, dirichlet, 0.0);

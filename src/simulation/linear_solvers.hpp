@@ -17,6 +17,8 @@ public:
     ~LineTransforms();
     // data[outer][length][inner] <- sum_n data[outer][n][inner]*trig(pi*(k + wave_shift)*(n + sample_shift)/length)
     void apply(real* data, int length, long outer, long inner, real wave_shift, real sample_shift, bool sine);
+    // discrete Hartley transform, sum_n data[n]*(cos + sin)(2 pi k n/length), real and diagonalizing on a periodic axis
+    void applyHartley(real* data, int length, long outer, long inner);
 
 private:
     cufftHandle plan(int padded_length, long batch);
@@ -31,12 +33,15 @@ public:
     void solve(const real* rhs, real* solution);
 
 private:
+    void transformAxis(real* data, int length, long outer, long inner, int axis, bool inverse);
+
     GridView grid;
     SlabTranspose& transpose;
     LineTransforms& transforms;
     real shift, scale;
     real wave_shift[max_dims], sample_shift[max_dims];
     bool sine[max_dims];
+    bool hartley[max_dims];  // periodic axes
     DeviceArray<real> eigenvalues[max_dims];  // per axis laplacian eigenvalues
     DeviceArray<real> norms[max_dims];        // per axis 1/|basis|^2, folded into the divide
     DeviceArray<real> compact, pencils;

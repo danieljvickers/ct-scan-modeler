@@ -25,11 +25,21 @@ def validate_case(case):
     boundaries = [case[f"bc_{direction}%{side}"] for direction in "xyz"[:dims] for side in ("beg", "end")]
     for boundary in boundaries:
         assert boundary in constants.SUPPORTED_BCS, f"ERROR :: boundary condition {boundary} is not supported"
-    assert constants.BC_GHOST_EXTRAP in boundaries, "ERROR :: one boundary must be -3 (outflow) to fix the pressure level"
+    for direction in "xyz"[:dims]:
+        is_periodic = [case[f"bc_{direction}%{side}"] == constants.BC_PERIODIC for side in ("beg", "end")]
+        assert is_periodic[0] == is_periodic[1], f"ERROR :: bc_{direction}%beg and bc_{direction}%end must both be periodic or neither"
+    is_fully_periodic = all(boundary == constants.BC_PERIODIC for boundary in boundaries)
+    assert is_fully_periodic or constants.BC_GHOST_EXTRAP in boundaries, \
+        "ERROR :: one boundary must be -3 (outflow) to fix the pressure level, unless every boundary is periodic"
 
     for patch_id in range(1, case["num_patches"] + 1):
-        assert case.family("patch_icpp", patch_id)["geometry"] == constants.ICPP_RECTANGLE, \
-            f"ERROR :: patch_icpp({patch_id}) must be a rectangle (geometry = 3)"
+        patch = case.family("patch_icpp", patch_id)
+        assert patch["geometry"] in (constants.ICPP_RECTANGLE, constants.ICPP_HARDCODED_2D), \
+            f"ERROR :: patch_icpp({patch_id})%geometry must be 3 (rectangle) or 7 (hardcoded 2D)"
+        if patch["geometry"] == constants.ICPP_HARDCODED_2D:
+            assert dims == 2 and patch["hcid"] == constants.HCID_GAUSSIAN_VORTEX, \
+                f"ERROR :: patch_icpp({patch_id}) hardcoded fields are 2D only, with hcid = 201 (Gaussian vortex)"
+            assert patch["radius"] > 0, f"ERROR :: patch_icpp({patch_id})%radius must be positive"
 
     if not case["ib"]:
         return

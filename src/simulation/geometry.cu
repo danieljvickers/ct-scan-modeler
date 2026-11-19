@@ -9,6 +9,7 @@
 #include <map>
 #include <sstream>
 
+#include "boundary_conditions.hpp"
 #include "mpi_proxy.hpp"
 
 namespace {
@@ -256,6 +257,67 @@ __global__ void markersKernel(GridView grid, GeometryView geometry, int* markers
     markers[cell] = marker;
 }
 
+// fluid cells on any domain face can reach the outer flow
+__global__ void seedReachableKernel(GridView grid, const int* markers, real* reachable) {
+    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (owned >= grid.numOwned()) return;
+    int index[max_dims];
+    grid.ownedCell(owned, index[0], index[1], index[2]);
+    const long cell = grid.storageIndex(index[0], index[1], index[2]);
+    bool on_face = false;
+    for (int d = 0; d < numDims(grid); ++d) {
+        const int global_index = index[d] + grid.offset[d];
+        on_face |= global_index == 0 || global_index == grid.global_cells[d] - 1;
+    }
+    reachable[cell] = markers[cell] == 0 && on_face ? 1.0 : 0.0;
+}
+
+// spread reachability to face neighboring fluid cells, monotonic so the in place update is safe
+__global__ void growReachableKernel(GridView grid, const int* markers, real* reachable, int* changed) {
+    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (owned >= grid.numOwned()) return;
+    int index[max_dims];
+    grid.ownedCell(owned, index[0], index[1], index[2]);
+    const long cell = grid.storageIndex(index[0], index[1], index[2]);
+    if (markers[cell] != 0 || reachable[cell] > 0.0) return;
+    for (int d = 0; d < numDims(grid); ++d) {
+        for (int side = -1; side <= 1; side += 2) {
+            const int neighbor_global = index[d] + side + grid.offset[d];
+            if (!grid.periodic[d] && (neighbor_global < 0 || neighbor_global >= grid.global_cells[d])) continue;
+            if (reachable[cell + side*grid.stride(d)] > 0.0) {
+                reachable[cell] = 1.0;
+                *changed = 1;
+                return;
+            }
+        }
+    }
+}
+
+// fluid the outer flow cannot reach becomes part of a neighboring body
+__global__ void fillTrappedKernel(GridView grid, int* markers, const real* reachable, int* num_filled) {
+    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (owned >= grid.numOwned()) return;
+    int index[max_dims];
+    grid.ownedCell(owned, index[0], index[1], index[2]);
+    const long cell = grid.storageIndex(index[0], index[1], index[2]);
+    if (markers[cell] != 0 || reachable[cell] > 0.0) return;
+    int patch = 1;
+    for (int d = 0; d < numDims(grid); ++d)
+        for (int side = -1; side <= 1; side += 2) patch = markers[cell + side*grid.stride(d)] != 0 ? markers[cell + side*grid.stride(d)] : patch;
+    markers[cell] = patch;
+    atomicAdd(num_filled, 1);
+}
+
+__global__ void markersToRealKernel(long count, const int* markers, real* values) {
+    const long cell = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (cell < count) values[cell] = markers[cell];
+}
+
+__global__ void realToMarkersKernel(long count, const real* values, int* markers) {
+    const long cell = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (cell < count) markers[cell] = static_cast<int>(lround(values[cell]));
+}
+
 // a solid cell with fluid within gp_layers cells in each direction is a ghost point
 __global__ void cellTypesKernel(GridView grid, const int* markers, int gp_layers, signed char* cell_types, int* ghost_counter) {
     const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
@@ -289,8 +351,9 @@ __global__ void listGhostPointsKernel(GridView grid, const int* markers, const s
 }
 
 // levelset, outward normal averaged over tied elements, mirrored image point, and its interpolation weights
-__global__ void imagePointsKernel(GridView grid, GeometryView geometry, const int* markers, int num_ghost_points, const long* owned_cells,
-                                  const int* patch_ids, long* stencil_cells, real* weights, int* bilinear_counter, int* error_flag) {
+__global__ void imagePointsKernel(GridView grid, GeometryView geometry, const int* markers, int gp_layers, int num_ghost_points,
+                                  const long* owned_cells, const int* patch_ids, long* stencil_cells, real* weights, int* bilinear_counter,
+                                  int* error_flag, int* fallback_counter) {
     const int ghost = blockIdx.x*blockDim.x + threadIdx.x;
     if (ghost >= num_ghost_points) return;
     int i, j, k;
@@ -304,13 +367,17 @@ __global__ void imagePointsKernel(GridView grid, GeometryView geometry, const in
     real nearest = 1e300;
     for (int element = geometry.element_offsets[patch]; element < geometry.element_offsets[patch + 1]; ++element)
         nearest = fmin(nearest, norm(closestPointOnElement(geometry, element, center) - center));
-    Vector3 direction = {0.0, 0.0, 0.0};
+    Vector3 direction = {0.0, 0.0, 0.0}, first_direction = {0.0, 0.0, 0.0};
     for (int element = geometry.element_offsets[patch]; element < geometry.element_offsets[patch + 1]; ++element) {
         const Vector3 offset = closestPointOnElement(geometry, element, center) - center;
         const real distance = norm(offset);
         if (distance > nearest + tolerance) continue;
-        direction = direction + (distance <= tolerance ? outwardElementNormal(geometry, element) : (1.0/distance)*offset);
+        const Vector3 element_direction = distance <= tolerance ? outwardElementNormal(geometry, element) : (1.0/distance)*offset;
+        if (norm(first_direction) == 0.0) first_direction = element_direction;
+        direction = direction + element_direction;
     }
+    // opposite faces of a feature thinner than two cells cancel, keep one of them instead
+    if (norm(direction) < 0.5) direction = first_direction;
     const Vector3 normal = (1.0/norm(direction))*direction;
     const real image[max_dims] = {center.x + 2.0*nearest*normal.x, center.y + 2.0*nearest*normal.y, center.z + 2.0*nearest*normal.z};
 
@@ -319,7 +386,7 @@ __global__ void imagePointsKernel(GridView grid, GeometryView geometry, const in
     real fraction[max_dims] = {0.0, 0.0, 0.0};
     for (int d = 0; d < num_dims; ++d) {
         const real position = (image[d] - grid.origin[d])/grid.spacing[d] - 0.5;
-        const int lower_global = static_cast<int>(floor(position));
+        const int lower_global = isfinite(position) ? static_cast<int>(floor(position)) : -1;
         if (lower_global < 0 || lower_global + 1 >= grid.global_cells[d] ||
             lower_global - grid.offset[d] < -grid.halo[d] || lower_global + 1 - grid.offset[d] >= grid.cells[d] + grid.halo[d]) {
             atomicExch(error_flag, 1);
@@ -360,13 +427,51 @@ __global__ void imagePointsKernel(GridView grid, GeometryView geometry, const in
         weights[ghost*max_stencil + corner] = weight;
         weight_sum += weight;
     }
+    // a stencil buried in the body falls back on the ghost point's own fluid neighbors nearest the image point, as MFC does
     if (weight_sum <= 0.0) {
-        atomicExch(error_flag, 2);
+        atomicAdd(fallback_counter, 1);
+        real nearest_distances[max_stencil];
+        int num_found = 0;
+        const int reach_z = num_dims == 3 ? gp_layers : 0;
+        for (int dk = -reach_z; dk <= reach_z; ++dk)
+            for (int dj = -gp_layers; dj <= gp_layers; ++dj)
+                for (int di = -gp_layers; di <= gp_layers; ++di) {
+                    const long cell = grid.storageIndex(i + di, j + dj, k + dk);
+                    if (markers[cell] != 0) continue;
+                    const real separation[max_dims] = {grid.center(0, i + di) - image[0], grid.center(1, j + dj) - image[1],
+                                                       num_dims == 3 ? grid.center(2, k + dk) - image[2] : 0.0};
+                    const real distance = fmax(sqrt(separation[0]*separation[0] + separation[1]*separation[1] + separation[2]*separation[2]),
+                                               node_tolerance);
+                    int slot;
+                    if (num_found < max_stencil) {
+                        slot = num_found++;
+                    } else if (distance < nearest_distances[max_stencil - 1]) {
+                        slot = max_stencil - 1;  // replace the farthest kept neighbor
+                    } else {
+                        continue;
+                    }
+                    while (slot > 0 && nearest_distances[slot - 1] > distance) {  // keep the list sorted by distance
+                        nearest_distances[slot] = nearest_distances[slot - 1];
+                        corner_cells[slot] = corner_cells[slot - 1];
+                        --slot;
+                    }
+                    nearest_distances[slot] = distance;
+                    corner_cells[slot] = cell;
+                }
+        for (int corner = 0; corner < max_stencil; ++corner) {
+            const bool is_used = corner < num_found;
+            stencil_cells[ghost*max_stencil + corner] = is_used ? corner_cells[corner] : corner_cells[0];
+            weights[ghost*max_stencil + corner] = is_used ? 1.0/(nearest_distances[corner]*nearest_distances[corner]) : 0.0;
+            weight_sum += weights[ghost*max_stencil + corner];
+        }
+        if (num_found == 0) atomicExch(error_flag, 2);
+        for (int corner = 0; corner < max_stencil; ++corner) weights[ghost*max_stencil + corner] /= fmax(weight_sum, 1e-300);
         return;
     }
     for (int corner = 0; corner < max_stencil; ++corner) {
         stencil_cells[ghost*max_stencil + corner] = corner < num_corners ? corner_cells[corner] : corner_cells[0];
         weights[ghost*max_stencil + corner] = corner < num_corners ? weights[ghost*max_stencil + corner]/weight_sum : 0.0;
+        if (!isfinite(weights[ghost*max_stencil + corner])) atomicExch(error_flag, 3);
     }
     if (all_fluid) atomicAdd(bilinear_counter, 1);
 }
@@ -418,12 +523,13 @@ Geometry::Geometry(const Parameters& parameters, const GridView& grid) {
     // solid markers on every stored cell, so neighbors in the halo are known without an exchange
     markersKernel<<<numBlocks(grid.numStorage()), block_size>>>(grid, view, this->markers.data());
     CUDA_CHECK(cudaGetLastError());
+    this->fillTrappedFluid(grid);
 
     // classify owned cells and list the ghost points
-    DeviceArray<int> counters(4);  // ghost count, slot, bilinear count, error flag
+    DeviceArray<int> counters(5);  // ghost count, slot, bilinear count, error flag, neighbor fallback count
     cellTypesKernel<<<numBlocks(grid.numOwned()), block_size>>>(grid, this->markers.data(), parameters.gp_layers, this->cell_types.data(),
                                                                  counters.data());
-    int host_counters[4];
+    int host_counters[5];
     counters.copyToHost(host_counters);
     GhostPoints& ghosts = this->ghost_points;
     ghosts.count = host_counters[0];
@@ -435,16 +541,54 @@ Geometry::Geometry(const Parameters& parameters, const GridView& grid) {
     listGhostPointsKernel<<<numBlocks(grid.numOwned()), block_size>>>(grid, this->markers.data(), this->cell_types.data(), counters.data() + 1,
                                                                        ghosts.storage_cells.data(), ghosts.owned_cells.data(), ghosts.patch_ids.data());
     if (ghosts.count > 0)
-        imagePointsKernel<<<numBlocks(ghosts.count), block_size>>>(grid, view, this->markers.data(), ghosts.count, ghosts.owned_cells.data(),
-                                                                    ghosts.patch_ids.data(), ghosts.stencil_cells.data(), ghosts.weights.data(),
-                                                                    counters.data() + 2, counters.data() + 3);
+        imagePointsKernel<<<numBlocks(ghosts.count), block_size>>>(grid, view, this->markers.data(), parameters.gp_layers, ghosts.count,
+                                                                    ghosts.owned_cells.data(), ghosts.patch_ids.data(), ghosts.stencil_cells.data(),
+                                                                    ghosts.weights.data(), counters.data() + 2, counters.data() + 3,
+                                                                    counters.data() + 4);
     CUDA_CHECK(cudaGetLastError());
     counters.copyToHost(host_counters);
     CTM_REQUIRE(host_counters[3] != 1, "an image point stencil leaves this rank or the domain, refine the grid or move the body");
-    CTM_REQUIRE(host_counters[3] != 2, "an image point stencil holds no fluid cells, refine the grid near the body");
+    CTM_REQUIRE(host_counters[3] != 2, "a ghost point has no fluid neighbor within gp_layers");
+    CTM_REQUIRE(host_counters[3] != 3, "an image point interpolation weight is not finite");
 
-    real totals[2] = {static_cast<real>(ghosts.count), static_cast<real>(host_counters[2])};
-    allreduceSum(totals, 2);
+    real totals[3] = {static_cast<real>(ghosts.count), static_cast<real>(host_counters[2]), static_cast<real>(host_counters[4])};
+    allreduceSum(totals, 3);
     this->global_ghost_points = static_cast<long>(totals[0]);
     this->global_bilinear = static_cast<long>(totals[1]);
+    this->global_fallback = static_cast<long>(totals[2]);
+}
+
+// fluid pockets sealed by the bodies have no pressure level and make the Poisson problem singular, so they become solid
+void Geometry::fillTrappedFluid(const GridView& grid) {
+    HaloExchange exchange(grid);
+    HaloRule copy_rule;
+    for (int d = 0; d < max_dims; ++d)
+        for (int side = 0; side < 2; ++side) copy_rule.coefficient[d][side] = 1.0, copy_rule.value[d][side] = 0.0;
+    DeviceArray<real> reachable(grid.numStorage());
+    DeviceArray<int> flags(2);  // changed, number filled
+    seedReachableKernel<<<numBlocks(grid.numOwned()), block_size>>>(grid, this->markers.data(), reachable.data());
+
+    constexpr int sweeps_per_exchange = 8;
+    for (int changed = 1; changed != 0;) {
+        flags.fillZero();
+        for (int sweep = 0; sweep < sweeps_per_exchange; ++sweep)
+            growReachableKernel<<<numBlocks(grid.numOwned()), block_size>>>(grid, this->markers.data(), reachable.data(), flags.data());
+        fillHalos(grid, copy_rule, exchange, reachable.data());
+        int host_flags[2];
+        flags.copyToHost(host_flags);
+        changed = static_cast<int>(allreduceMax(static_cast<real>(host_flags[0])));
+    }
+
+    flags.fillZero();
+    fillTrappedKernel<<<numBlocks(grid.numOwned()), block_size>>>(grid, this->markers.data(), reachable.data(), flags.data() + 1);
+    int host_flags[2];
+    flags.copyToHost(host_flags);
+    this->global_trapped = static_cast<long>(allreduceSum(static_cast<real>(host_flags[1])));
+    if (this->global_trapped == 0) return;
+
+    // neighbor ranks see the filled cells in their halos
+    markersToRealKernel<<<numBlocks(grid.numStorage()), block_size>>>(grid.numStorage(), this->markers.data(), reachable.data());
+    exchange.exchange(reachable.data());
+    realToMarkersKernel<<<numBlocks(grid.numStorage()), block_size>>>(grid.numStorage(), reachable.data(), this->markers.data());
+    CUDA_CHECK(cudaGetLastError());
 }

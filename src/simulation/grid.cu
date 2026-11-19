@@ -15,16 +15,17 @@ GridView makeGrid(const Parameters& parameters) {
         grid.halo[d] = is_active ? halo_width : 0;
         grid.cells[d] = grid.global_cells[d];
         grid.offset[d] = 0;
-        grid.lower_boundary[d] = true;
-        grid.upper_boundary[d] = true;
+        grid.periodic[d] = is_active && parameters.boundary[d][0] == bc_periodic;
+        grid.lower_boundary[d] = !grid.periodic[d];
+        grid.upper_boundary[d] = !grid.periodic[d];
     }
 
     // slabs along the slowest axis, each needs at least a halo of cells
     const int axis = grid.decomposed_axis;
     grid.cells[axis] = partCount(grid.global_cells[axis], num_ranks, rank);
     grid.offset[axis] = partOffset(grid.global_cells[axis], num_ranks, rank);
-    grid.lower_boundary[axis] = rank == 0;
-    grid.upper_boundary[axis] = rank == num_ranks - 1;
+    grid.lower_boundary[axis] = !grid.periodic[axis] && rank == 0;
+    grid.upper_boundary[axis] = !grid.periodic[axis] && rank == num_ranks - 1;
     CTM_REQUIRE(grid.cells[axis] >= halo_width, "%d ranks leave fewer than %d cells per slab along axis %d, use fewer GPUs",
                 num_ranks, halo_width, axis);
 
