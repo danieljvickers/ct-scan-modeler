@@ -1,0 +1,12 @@
+# python environment and caches
+build/
+__pycache__/
+.pytest_cache/
+
+# simulation output, keep the convergence summary
+examples/*/D/
+examples/*/convergence/*/
+examples/*/convergence_driver.log
+
+# toolchain generated solver input
+examples/*/simulation.json

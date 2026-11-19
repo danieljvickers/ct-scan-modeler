@@ -1,0 +1,2 @@
+# optional GPU backend, enable with MFC_CUPY=1; match the driver CUDA major version
+cupy-cuda13x[ctk]==14.2.0
