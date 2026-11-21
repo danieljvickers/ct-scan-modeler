@@ -84,6 +84,8 @@ Each test in `toolchain/test_cases.py` starts from an example's `case.py`, divid
 | 2D cylinder on 2 GPUs | halo exchange and distributed transforms, against the 1 GPU golden |
 | 2D cylinder without immersed boundary | domain boundaries and solvers alone |
 | 2D cylinder with no-slip walls | the -16 boundary rules |
+| 2D cylinder with rk3 | the three stage Runge-Kutta table with the previous stage convection term |
+| 2D cylinder with rk3 and a single projection | unprojected intermediate stages and the full step projection |
 
 A computer is one shell script in `toolchain/computers` that exports the compilers, MPI, and `CTM_CUDA_ARCHITECTURES`, with a `# aliases:` comment line. `model` is a placeholder.
 
@@ -99,7 +101,7 @@ A second order finite volume scheme matches the second order accuracy of the gho
 ### Scheme
 
 - **Grid**: collocated cell-centered finite volume, uniform or MFC tanh stretching.
-- **Time integration**: Runge-Kutta stages in the form of Le & Moin (1991): explicit convection, Crank-Nicolson diffusion, and a projection each stage. Only rk1 is implemented; it is stable for central convection while dt ≤ 2ν/U², which holds for the low Reynolds number cases here.
+- **Time integration**: Runge-Kutta stages in the form of Le & Moin (1991): explicit convection, Crank-Nicolson diffusion, and a projection each stage. `rk_order` picks 1, 2, or 3 stages. rk1 is stable for central convection only while dt ≤ 2ν/U²; rk3 is stable up to a convective CFL number of about √3, so it is the choice once viscosity no longer limits dt.
 - **Pressure**: incremental pressure correction projection [3, 4]. Face velocities are kept separately and made exactly divergence free, the collocated approach of [5] used with immersed boundaries in [6]. A Rhie-Chow style term on interior fluid faces prevents pressure checkerboarding.
 - **Linear solves**, selected by `poisson_solver`:
   - `1`: the velocity Helmholtz and pressure Poisson matrices are LU factorized once with SuperLU. This works on stretched grids but is slow on the GPU.
@@ -125,6 +127,8 @@ Keys follow MFC wherever the meaning carries over. The full list with defaults i
 | `x_domain%beg`, `x_domain%end`, `m` | required | Domain before stretching and number of cells minus one |
 | `stretch_x`, `a_x`, `x_a`, `x_b`, `loops_x` | `F`, 0, 0, 0, 1 | MFC tanh stretching, uniform between `x_a` and `x_b` |
 | `dt`, `t_step_stop`, `t_step_save` | required | Fixed time step, last step, save interval |
+| `rk_single_projection` | `F` | Project only at the last Runge-Kutta stage (Le & Moin 1991): one pressure solve per step instead of one per stage, intermediate stages are not divergence free |
+| `rk_order` | 1 | Runge-Kutta order 1, 2, or 3 (midpoint rule, Wray's low storage scheme); each stage has Crank-Nicolson diffusion and a projection |
 | `poisson_solver` | 1 | 1 = sparse direct LU, 2 = spectral preconditioned GMRES (uniform grid) |
 | `fluid_pp(1)%Re(1)` | 0 | Inverse kinematic viscosity, as in MFC |
 | `bc_x%beg` | -3 | -3 outflow (`p = 0`), -15 slip wall, -16 no-slip wall, -17 inflow at `bc_x%vel_in(i)` |
@@ -146,3 +150,9 @@ Pressure is kinematic (pressure over density) and density is 1.
 8. Chaudhuri, A., Hadjadj, A. & Chinnayya, A. (2011). On the use of immersed boundary methods for shock/obstacle interactions. *J. Comput. Phys.* 230, 1731–1748. doi:10.1016/j.jcp.2010.11.016
 9. Saad, Y. & Schultz, M. H. (1986). GMRES: A generalized minimal residual algorithm for solving nonsymmetric linear systems. *SIAM J. Sci. Stat. Comput.* 7, 856–869. doi:10.1137/0907058
 10. Makhoul, J. (1980). A fast cosine transform in one and two dimensions. *IEEE Trans. Acoust., Speech, Signal Process.* 28, 27–34. doi:10.1109/TASSP.1980.1163351
+
+## Extracting STLs from CT
+
+`./ctm.sh extract <ct.nii.gz> <out.stl>` builds a watertight binary STL of the airway lumen (`src/model_builder`). Each axial slice is thresholded and outside air is dropped, a trachea seed is found as a round air tube near the head end, and the threshold is raised from -950 HU until the connected volume jumps (leak into the lungs). The mask is surfaced with marching cubes, centered, and written in meters (`--units-per-mm`). `--labels` takes a ground truth airway mask instead. On AeroPath subject 1 the Dice against the provided airway labels is about 0.92 in a test crop.
+
+![Airway STL and axial slices at 1/4, 1/2, 3/4 of the airway height](docs/airway_extraction.png)

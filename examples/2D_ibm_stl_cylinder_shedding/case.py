@@ -10,16 +10,18 @@ free_stream_velocity = 1.0
 Re = 200.0
 kick_velocity = 0.25  # transverse velocity behind the body at t = 0, starts the shedding without waiting on round-off
 
-# uniform grid and time stepping in convective units, rk1 with central convection needs dt below 2 nu/|u|^2
+# uniform grid and time stepping in convective units, rk3 is stable for central convection up to a CFL number near sqrt(3)
+rk_order = 3
+cfl = 0.8
 cells_per_diameter = 32
 x_beg, x_end = -15.0, 35.0
 y_beg, y_end = -15.0, 15.0
 cell_width = diameter/cells_per_diameter
-save_interval = 0.25  # about 20 saves per shedding period
+save_interval = 0.5  # about 10 saves per shedding period
 max_speed = 1.6*free_stream_velocity
-steps_per_save = math.ceil(save_interval/(0.5*2.0*diameter/Re/max_speed**2))
+steps_per_save = math.ceil(save_interval/(cfl*cell_width/max_speed))
 dt = save_interval/steps_per_save
-t_stop = 150.0
+t_stop = 200.0
 t_step_stop = int(round(t_stop/dt))
 
 print(json.dumps({
@@ -39,8 +41,10 @@ print(json.dumps({
     "t_step_save": steps_per_save,
     # Simulation Algorithm Parameters
     "num_patches": 2,
+    "rk_order": rk_order,
+    "rk_single_projection": "T",  # one pressure solve per step, Le & Moin (1991)
     "poisson_solver": 2,  # GMRES with a spectral preconditioner
-    "krylov_tolerance": 1.0e-10,
+    "krylov_tolerance": 1.0e-7,
     "viscous": "T",
     "bc_x%beg": -17,  # Dirichlet inflow
     "bc_x%vel_in(1)": free_stream_velocity,

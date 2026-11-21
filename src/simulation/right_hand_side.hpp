@@ -18,7 +18,12 @@ struct StageCoefficients {
     real alpha;  // stage time fraction for pressure and diffusion
 };
 
+// rk2 is the explicit midpoint rule, rk3 the low storage scheme of Wray as used by Le & Moin (1991)
 constexpr StageCoefficients rk1_stages[] = {{1.0, 0.0, 1.0}};
+constexpr StageCoefficients rk2_stages[] = {{0.5, 0.0, 0.5}, {1.0, -0.5, 0.5}};
+constexpr StageCoefficients rk3_stages[] = {{8.0/15.0, 0.0, 8.0/15.0}, {5.0/12.0, -17.0/60.0, 2.0/15.0}, {3.0/4.0, -5.0/12.0, 1.0/3.0}};
+
+std::vector<StageCoefficients> rungeKuttaStages(int rk_order);
 
 class FlowSolver {
 public:

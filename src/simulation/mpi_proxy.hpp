@@ -38,6 +38,7 @@ public:
     ~SlabTranspose();
     void toPencils(const real* compact, real* pencils);
     void toSlabs(const real* pencils, real* compact);
+    bool isSingleRank() const { return this->num_ranks == 1; }
 
     int axis_cells;     // full length of the decomposed axis
     int num_rows;       // rows over all ranks

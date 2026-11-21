@@ -5,25 +5,32 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <tuple>
 
 #include <cublas_v2.h>
 #include <cufft.h>
 
 #include "boundary_conditions.hpp"
 
-// batched 1D sine or cosine transforms along one axis through a zero padded complex FFT of twice the length
+// batched 1D sine and cosine transforms along one axis of data[outer][length][inner], unnormalized
 class LineTransforms {
 public:
     ~LineTransforms();
-    // data[outer][length][inner] <- sum_n data[outer][n][inner]*trig(pi*(k + wave_shift)*(n + sample_shift)/length)
+    // general form through a zero padded complex FFT of twice the length, the fallback for odd type IV lengths:
+    // data <- sum_n data[n]*trig(pi*(k + wave_shift)*(n + sample_shift)/length)
     void apply(real* data, int length, long outer, long inner, real wave_shift, real sample_shift, bool sine);
+    // DCT-II or DST-II, and their transposes (DCT-III, DST-III) when inverse, through one real FFT of the same length, Makhoul (1980)
+    void applyType2(real* data, int length, long outer, long inner, bool sine, bool inverse);
+    // DCT-IV or DST-IV, their own transposes, through a complex FFT of half the length; the length must be even
+    void applyType4(real* data, int length, long outer, long inner, bool sine);
     // discrete Hartley transform, sum_n data[n]*(cos + sin)(2 pi k n/length), real and diagonalizing on a periodic axis
     void applyHartley(real* data, int length, long outer, long inner);
 
 private:
-    cufftHandle plan(int padded_length, long batch);
-    std::map<std::pair<int, long>, cufftHandle> plans;
+    cufftHandle plan(cufftType type, int length, long batch);
+    std::map<std::tuple<int, int, long>, cufftHandle> plans;
     DeviceArray<cufftDoubleComplex> work;
+    DeviceArray<real> real_work;
 };
 
 // exact solve of (shift + scale*laplacian) x = b on the uniform grid with domain halos only, the no-body operator
@@ -34,6 +41,7 @@ public:
 
 private:
     void transformAxis(real* data, int length, long outer, long inner, int axis, bool inverse);
+    bool is_single_rank;  // every axis is local, so the decomposed axis transforms in place without the transpose
 
     GridView grid;
     SlabTranspose& transpose;

@@ -66,6 +66,9 @@ Parameters readParameters(const std::string& path) {
     parameters.t_step_start = input.integer("t_step_start");
     parameters.t_step_stop = input.integer("t_step_stop");
     parameters.t_step_save = input.integer("t_step_save");
+    parameters.rk_order = input.integer("rk_order");
+    parameters.rk_single_projection = input.logical("rk_single_projection");
+    CTM_REQUIRE(parameters.rk_order >= 1 && parameters.rk_order <= 3, "rk_order must be 1, 2, or 3");
     parameters.viscous = input.logical("viscous");
     parameters.kinematic_viscosity = parameters.viscous ? 1.0/input.number("fluid_pp(1)%Re(1)") : 0.0;
     CTM_REQUIRE(input.integer("poisson_solver") == 2, "the CUDA solver needs poisson_solver = 2");
@@ -123,7 +126,8 @@ void checkCaseOptimization(const Parameters& parameters) {
     const bool matches = case_parameters::m + 1 == parameters.global_cells[0] && case_parameters::n + 1 == parameters.global_cells[1] &&
                          case_parameters::p + 1 == parameters.global_cells[2] && case_parameters::viscous == parameters.viscous &&
                          case_parameters::ib == parameters.ib && case_parameters::gp_layers == parameters.gp_layers &&
-                         case_parameters::krylov_restart == parameters.krylov_restart &&
+                         case_parameters::krylov_restart == parameters.krylov_restart && case_parameters::rk_order == parameters.rk_order &&
+                         case_parameters::rk_single_projection == parameters.rk_single_projection &&
                          (!parameters.ib || case_parameters::num_ibs == static_cast<int>(parameters.immersed_patches.size()));
     CTM_REQUIRE(matches, "this binary was case optimized for different parameters (%s), rebuild through ./ctm.sh run",
                 case_parameters::summary);

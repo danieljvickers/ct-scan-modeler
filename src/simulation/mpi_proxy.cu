@@ -158,6 +158,7 @@ SlabTranspose::SlabTranspose(const GridView& grid) : cuda_aware(useCudaAwareMpi(
     this->device_slab_counts.copyFromHost(slab_counts.data(), this->num_ranks);
     this->device_receive_displacements.copyFromHost(this->receive_displacements.data(), this->num_ranks);
 
+    if (this->num_ranks == 1) return;  // a single rank transforms in place and needs no buffers
     const long slab_elements = static_cast<long>(this->num_rows)*this->slab_cells;
     const long pencil_elements = static_cast<long>(this->local_rows)*this->axis_cells;
     this->device_send.resize(std::max(slab_elements, pencil_elements));

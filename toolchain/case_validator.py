@@ -12,6 +12,7 @@ def num_dims(case):
 def validate_case(case):
     dims = num_dims(case)
     assert dims >= 2, "ERROR :: cases must be 2D (n > 0) or 3D (n > 0, p > 0)"
+    assert case["rk_order"] in (1, 2, 3), "ERROR :: rk_order must be 1, 2, or 3"
     assert case["poisson_solver"] in (constants.POISSON_SPARSE_LU, constants.POISSON_SPECTRAL_KRYLOV), \
         "ERROR :: poisson_solver must be 1 (sparse LU) or 2 (spectral Krylov)"
     if case["poisson_solver"] == constants.POISSON_SPECTRAL_KRYLOV:

@@ -1,4 +1,4 @@
-"""Command line entry point behind ./ctm.sh <run|build|test|model>."""
+"""Command line entry point behind ./ctm.sh <run|build|test|extract|model>."""
 
 import argparse
 import os
@@ -38,6 +38,14 @@ def make_parser():
     test_parser.add_argument("--generate", action="store_true", help="write new golden files instead of comparing")
     test_parser.add_argument("-o", "--only", nargs="+", default=[], help="test ids or parts of test names to run")
     add_build_arguments(test_parser)
+    extract_parser = commands.add_parser("extract", allow_abbrev=False, help="extract an airway STL from a CT volume")
+    extract_parser.add_argument("ct", help="CT volume, .nii or .nii.gz")
+    extract_parser.add_argument("output", help="output binary STL")
+    extract_parser.add_argument("--labels", default=None, help="airway label volume, skips thresholding and seeding")
+    extract_parser.add_argument("--threshold", type=float, default=None, help="lowest air threshold in HU")
+    extract_parser.add_argument("--smoothing", type=float, default=1.0, help="gaussian sigma in voxels before surfacing")
+    extract_parser.add_argument("--units-per-mm", type=float, default=1.0e-3, help="STL length per mm, default meters")
+    extract_parser.add_argument("--no-center", action="store_true", help="keep the scanner position")
     commands.add_parser("model", help="not implemented yet")
     return parser
 
@@ -49,6 +57,10 @@ def main():
             run(arguments)
         elif arguments.command == "test":
             test(arguments)
+        elif arguments.command == "extract":
+            from src.model_builder.extract import extract_airway
+            extract_airway(arguments.ct, arguments.output, arguments.labels, arguments.threshold, arguments.smoothing,
+                           arguments.units_per_mm, not arguments.no_center)
         elif arguments.command == "build":
             print(f"INFO :: installed {build(None, arguments.computer, arguments.jobs, arguments.debug, arguments.verbose)}")
         else:

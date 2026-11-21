@@ -54,6 +54,8 @@ struct Parameters {
 
     real dt;
     int t_step_start, t_step_stop, t_step_save;
+    int rk_order;  // Runge-Kutta stages per step, each with Crank-Nicolson diffusion and a projection
+    bool rk_single_projection;  // project only at the last stage, Le & Moin (1991)
 
     bool viscous;
     real kinematic_viscosity;  // 1/fluid_pp(1)%Re(1), density is 1

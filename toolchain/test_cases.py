@@ -49,4 +49,6 @@ CASES = [
     TestCase("2D cylinder on 2 GPUs", CYLINDER, num_gpus=2, golden_from="2D cylinder"),
     TestCase("2D cylinder without immersed boundary", CYLINDER, overrides={"ib": False, "num_ibs": 0}),
     TestCase("2D cylinder with no-slip walls", CYLINDER, overrides={"bc_y%beg": -16, "bc_y%end": -16}),
+    TestCase("2D cylinder with rk3", CYLINDER, overrides={"rk_order": 3}),
+    TestCase("2D cylinder with rk3 and a single projection", CYLINDER, overrides={"rk_order": 3, "rk_single_projection": True}),
 ]

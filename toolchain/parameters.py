@@ -39,6 +39,8 @@ SCALARS = {
     "t_step_save": Parameter(INTEGER, None, "time steps between field saves"),
     # simulation algorithm
     "num_patches": Parameter(INTEGER, 1, "number of initial condition patches"),
+    "rk_single_projection": Parameter(LOGICAL, False, "project only at the last Runge-Kutta stage, Le & Moin (1991)"),
+    "rk_order": Parameter(INTEGER, 1, "Runge-Kutta order 1, 2, or 3, each stage with Crank-Nicolson diffusion and a projection"),
     "poisson_solver": Parameter(INTEGER, 1, "1 = sparse direct LU, 2 = GMRES with a spectral preconditioner (uniform grid)"),
     "krylov_tolerance": Parameter(REAL, 1.0e-10, "relative residual at which GMRES stops"),
     "krylov_restart": Parameter(INTEGER, 30, "GMRES restart length"),
@@ -114,4 +116,4 @@ def lookup(name):
 
 
 # parameters compiled in as constants by a case optimized build, changing any of them triggers a rebuild
-CASE_OPTIMIZATION = ("m", "n", "p", "poisson_solver", "viscous", "ib", "num_ibs", "gp_layers", "krylov_restart")
+CASE_OPTIMIZATION = ("m", "n", "p", "rk_order", "rk_single_projection", "poisson_solver", "viscous", "ib", "num_ibs", "gp_layers", "krylov_restart")

@@ -18,7 +18,7 @@ from toolchain.test_cases import CASES
 
 GOLDEN_ROOT = os.path.join(REPO_ROOT, "tests", "regression")
 NUM_PROBES = 64             # field values sampled evenly through the flattened array
-ABSOLUTE_FRACTION = 1e-9    # absolute tolerance as a fraction of the largest golden magnitude of each entry
+ABSOLUTE_FRACTION = 1e-9    # absolute tolerance as a fraction of the larger of the entry's and the run's largest magnitude
 
 
 def extract_values(output_dir):
@@ -56,14 +56,19 @@ def read_golden(path):
 
 
 def compare(values, golden, relative_tolerance):
-    """Return a description of every entry outside |value - golden| <= rtol*|golden| + atol."""
+    """Return a description of every entry outside |value - golden| <= rtol*|golden| + atol.
+
+    The absolute floor scales with the largest field magnitude of the run, so entries that are round-off zero, like the
+    cross-stream velocity without a body, pass.
+    """
     failures = []
+    field_scale = max([abs(numbers[2]) for key, numbers in golden.items() if key.endswith("_norms")] + [1e-300])
     for key in sorted(set(values) | set(golden)):
         if key not in values or key not in golden or len(values[key]) != len(golden[key]):
             failures.append(f"{key}: present in only one of the run and the golden file, or a different length")
             continue
         expected, actual = np.array(golden[key]), np.array(values[key])
-        tolerance = relative_tolerance*np.abs(expected) + ABSOLUTE_FRACTION*max(np.abs(expected).max(), 1e-300)
+        tolerance = relative_tolerance*np.abs(expected) + ABSOLUTE_FRACTION*max(np.abs(expected).max(), field_scale)
         for index in np.nonzero(~(np.abs(actual - expected) <= tolerance))[0]:
             failures.append(f"{key}[{index}]: {actual[index]:.15e} vs golden {expected[index]:.15e}")
     return failures

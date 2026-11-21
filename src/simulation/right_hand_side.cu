@@ -228,9 +228,15 @@ real maxAbsolute(long count, const real* values, const signed char* cell_types, 
 
 }  // namespace
 
+std::vector<StageCoefficients> rungeKuttaStages(int rk_order) {
+    if (rk_order == 3) return {std::begin(rk3_stages), std::end(rk3_stages)};
+    if (rk_order == 2) return {std::begin(rk2_stages), std::end(rk2_stages)};
+    return {std::begin(rk1_stages), std::end(rk1_stages)};
+}
+
 FlowSolver::FlowSolver(const Parameters& parameters, const GridView& grid, ImmersedBoundaries& immersed_boundaries)
     : parameters(parameters), grid(grid), immersed_boundaries(immersed_boundaries),
-      stages(std::begin(rk1_stages), std::end(rk1_stages)), num_dims(grid.num_dims), exchange(grid), transpose(grid),
+      stages(rungeKuttaStages(parameters.rk_order)), num_dims(grid.num_dims), exchange(grid), transpose(grid),
       gmres(grid.numOwned(), parameters.krylov_restart, parameters.krylov_tolerance, parameters.krylov_max_iterations) {
     const long num_storage = grid.numStorage(), num_owned = grid.numOwned();
     for (int d = 0; d < max_dims; ++d) {
@@ -352,7 +358,18 @@ void FlowSolver::stage(int stage_index) {
                                                                               this->immersed_boundaries.geometry.markers.data(), stage_dt,
                                                                               this->faces[d].data());
     CUDA_CHECK(cudaGetLastError());
-    this->project(stage_dt);
+    // with a single projection the earlier stages carry the tentative velocity forward, the last one removes the
+    // divergence of the whole step, so its pressure increment spans the full dt
+    const bool is_last_stage = stage_index == static_cast<int>(this->stages.size()) - 1;
+    if (this->parameters.rk_single_projection && !is_last_stage) {
+        for (int component = 0; component < this->num_dims; ++component)
+            CUDA_CHECK(cudaMemcpy(this->velocity[component].data(), this->predicted[component].data(), g.numStorage()*sizeof(real),
+                                  cudaMemcpyDeviceToDevice));
+        for (int component = 0; component < this->num_dims; ++component) this->immersed_boundaries.applyGhostVelocity(this->velocity[component].data());
+        this->fillVelocityHalos(this->velocity);
+    } else {
+        this->project(this->parameters.rk_single_projection ? this->parameters.dt : stage_dt);
+    }
     for (int component = 0; component < this->num_dims; ++component)
         std::swap(this->convection[component], this->previous_convection[component]);
 }

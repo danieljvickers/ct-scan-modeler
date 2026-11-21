@@ -15,8 +15,13 @@ from prototype.operators import DIRECTIONS, sum_over_directions
 
 VELOCITIES = ("u", "v")
 
-# (gamma, zeta, alpha) per stage: convection weights for this and the previous stage, and the stage time fraction
-RK1_STAGES = ((1.0, 0.0, 1.0),)
+# (gamma, zeta, alpha) per stage: convection weights for this and the previous stage, and the stage time fraction;
+# rk2 is the explicit midpoint rule, rk3 the low storage scheme of Wray as used by Le & Moin (1991)
+RK_STAGES = {
+    1: ((1.0, 0.0, 1.0),),
+    2: ((0.5, 0.0, 0.5), (1.0, -0.5, 0.5)),
+    3: ((8.0/15.0, 0.0, 8.0/15.0), (5.0/12.0, -17.0/60.0, 2.0/15.0), (3.0/4.0, -5.0/12.0, 1.0/3.0)),
+}
 
 
 class FractionalStepSolver:
@@ -31,7 +36,7 @@ class FractionalStepSolver:
         self.dt = case["dt"]
         self.kinematic_viscosity = 1.0/case["fluid_pp(1)%Re(1)"] if case["viscous"] else 0.0
         self.laplacians = {variable: operators.laplacian(variable) for variable in VELOCITIES}
-        self.stages = RK1_STAGES
+        self.stages = RK_STAGES[case["rk_order"]]
 
         # velocity Helmholtz systems per stage, built once since dt and viscosity are fixed
         identity = host_sparse.identity(grid.num_cells, format="csr")
@@ -118,7 +123,15 @@ class FractionalStepSolver:
                                   - operators.face["p"][d].face_gradient(pressure))
             predicted_faces[d] = operators.face[variable][d].interpolate(predicted[variable]) + stage_dt*self.fluid_faces[d]*pressure_smoothing
 
-        velocities, face_velocities, pressure_correction = self._project(predicted, predicted_faces, stage_dt)
+        # with a single projection the earlier stages carry the tentative velocity forward, the last one removes the
+        # divergence of the whole step, so its pressure increment spans the full dt
+        if self.case["rk_single_projection"] and stage_index < len(self.stages) - 1:
+            if self.ib is not None:
+                for variable in VELOCITIES:
+                    self.ib.apply_ghost_velocity(predicted[variable])
+            return predicted, predicted_faces, pressure, convection
+        projection_dt = dt if self.case["rk_single_projection"] else stage_dt
+        velocities, face_velocities, pressure_correction = self._project(predicted, predicted_faces, projection_dt)
         return velocities, face_velocities, pressure + pressure_correction, convection
 
     def step(self, velocities, face_velocities, pressure):
