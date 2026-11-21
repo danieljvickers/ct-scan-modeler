@@ -83,7 +83,7 @@ HaloRule makeHaloRule(const Parameters& parameters, FieldKind kind) {
             } else if (boundary == bc_dirichlet) {
                 is_velocity ? setSide(rule, d, side, dirichlet, parameters.inflow_velocity[d][kind]) : setSide(rule, d, side, neumann, 0.0);
             } else if (boundary == bc_ghost_extrapolation) {
-                is_velocity ? setSide(rule, d, side, neumann, 0.0) : setSide(rule, d, side, dirichlet, 0.0);
+                is_velocity ? setSide(rule, d, side, neumann, 0.0) : setSide(rule, d, side, dirichlet, parameters.boundary_pressure[d][side]);
             } else if (boundary == bc_slip_wall) {
                 setSide(rule, d, side, is_velocity && is_normal ? dirichlet : neumann, 0.0);
             } else if (boundary == bc_no_slip_wall) {

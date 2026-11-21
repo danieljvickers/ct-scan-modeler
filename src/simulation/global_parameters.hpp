@@ -14,7 +14,7 @@
 // boundary condition flags, values match MFC
 enum BoundaryCondition : int {
     bc_periodic = -1,             // wraps to the opposite side
-    bc_ghost_extrapolation = -3,  // outflow: zero normal velocity gradient, zero pressure
+    bc_ghost_extrapolation = -3,  // outflow: zero normal velocity gradient, pressure held at boundary_pressure
     bc_slip_wall = -15,           // zero normal velocity, zero tangential gradient
     bc_no_slip_wall = -16,        // zero velocity
     bc_dirichlet = -17,           // inflow at bc_%vel_in, zero pressure gradient
@@ -38,6 +38,7 @@ struct InitialPatch {
 struct ImmersedPatch {
     std::string stl_path;
     real threshold;  // winding number above which a cell is solid
+    bool invert = false;  // solid is everything outside the model, for flow inside a closed surface
     real scale[max_dims];
     real translate[max_dims];
     real rotate[max_dims];  // radians
@@ -64,6 +65,7 @@ struct Parameters {
 
     int boundary[max_dims][2];             // [direction][begin, end]
     real inflow_velocity[max_dims][max_dims];  // [direction][component] for Dirichlet boundaries
+    real boundary_pressure[max_dims][2];       // [direction][side] kinematic pressure at outflow (-3) boundaries
 
     std::vector<InitialPatch> initial_patches;
     bool ib;

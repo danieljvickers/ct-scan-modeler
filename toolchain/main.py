@@ -45,6 +45,12 @@ def make_parser():
     extract_parser.add_argument("--threshold", type=float, default=None, help="lowest air threshold in HU")
     extract_parser.add_argument("--smoothing", type=float, default=1.0, help="gaussian sigma in voxels before surfacing")
     extract_parser.add_argument("--units-per-mm", type=float, default=1.0e-3, help="STL length per mm, default meters")
+    extract_parser.add_argument("--prune", type=float, default=0.01,
+                                help="drop pieces under this fraction of the largest, 0 keeps all")
+    extract_parser.add_argument("--crop-mm", type=float, nargs=6, metavar=("X0", "X1", "Y0", "Y1", "Z0", "Z1"),
+                                help="keep this box of the volume and extrude its z ends as open tubes for inflow and outflow")
+    extract_parser.add_argument("--thin-branch-mm", type=float, default=0.0, help="delete branches thinner than this radius")
+    extract_parser.add_argument("--extension-mm", type=float, default=20.0, help="length of each extruded end")
     extract_parser.add_argument("--no-center", action="store_true", help="keep the scanner position")
     commands.add_parser("model", help="not implemented yet")
     return parser
@@ -60,7 +66,8 @@ def main():
         elif arguments.command == "extract":
             from src.model_builder.extract import extract_airway
             extract_airway(arguments.ct, arguments.output, arguments.labels, arguments.threshold, arguments.smoothing,
-                           arguments.units_per_mm, not arguments.no_center)
+                           arguments.units_per_mm, not arguments.no_center, arguments.prune,
+                           arguments.crop_mm, arguments.extension_mm, arguments.thin_branch_mm)
         elif arguments.command == "build":
             print(f"INFO :: installed {build(None, arguments.computer, arguments.jobs, arguments.debug, arguments.verbose)}")
         else:

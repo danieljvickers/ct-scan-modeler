@@ -154,6 +154,7 @@ struct GeometryView {
     const int* element_offsets;  // [num_patches + 1] in elements
     const real* bounding_boxes;  // [patch][lower xyz, upper xyz]
     const real* thresholds;
+    const real* inverts;  // 1 when the solid is outside the model
     const real* tie_tolerances;
 };
 
@@ -252,7 +253,11 @@ __global__ void markersKernel(GridView grid, GeometryView geometry, int* markers
         const real* box = geometry.bounding_boxes + 6*patch;
         const bool in_box = center.x >= box[0] && center.x <= box[3] && center.y >= box[1] && center.y <= box[4] &&
                             (geometry.num_dims == 2 || (center.z >= box[2] && center.z <= box[5]));
-        if (in_box && windingNumber(geometry, patch, center) > geometry.thresholds[patch]) marker = patch + 1;
+        if (geometry.inverts[patch] > 0.5) {
+            if (!in_box || windingNumber(geometry, patch, center) <= geometry.thresholds[patch]) marker = patch + 1;
+        } else if (in_box && windingNumber(geometry, patch, center) > geometry.thresholds[patch]) {
+            marker = patch + 1;
+        }
     }
     markers[cell] = marker;
 }
@@ -386,9 +391,9 @@ __global__ void imagePointsKernel(GridView grid, GeometryView geometry, const in
     real fraction[max_dims] = {0.0, 0.0, 0.0};
     for (int d = 0; d < num_dims; ++d) {
         const real position = (image[d] - grid.origin[d])/grid.spacing[d] - 0.5;
-        const int lower_global = isfinite(position) ? static_cast<int>(floor(position)) : -1;
-        if (lower_global < 0 || lower_global + 1 >= grid.global_cells[d] ||
-            lower_global - grid.offset[d] < -grid.halo[d] || lower_global + 1 - grid.offset[d] >= grid.cells[d] + grid.halo[d]) {
+        // an image point past the first or last cell center of the domain takes that edge stencil, so a wall may meet a domain face
+        const int lower_global = isfinite(position) ? min(max(static_cast<int>(floor(position)), 0), grid.global_cells[d] - 2) : -1;
+        if (lower_global < 0 || lower_global - grid.offset[d] < -grid.halo[d] || lower_global + 1 - grid.offset[d] >= grid.cells[d] + grid.halo[d]) {
             atomicExch(error_flag, 1);
             return;
         }
@@ -485,7 +490,7 @@ Geometry::Geometry(const Parameters& parameters, const GridView& grid) {
     this->num_patches = static_cast<int>(parameters.immersed_patches.size());
 
     // read and place every model on the host
-    std::vector<real> elements, bounding_boxes, thresholds, tie_tolerances;
+    std::vector<real> elements, bounding_boxes, thresholds, inverts, tie_tolerances;
     std::vector<int> element_offsets = {0};
     const int values_per_element = parameters.num_dims == 2 ? 4 : 9;
     for (const ImmersedPatch& patch : parameters.immersed_patches) {
@@ -505,20 +510,22 @@ Geometry::Geometry(const Parameters& parameters, const GridView& grid) {
         element_offsets.push_back(static_cast<int>(elements.size()/values_per_element));
         bounding_boxes.insert(bounding_boxes.end(), {lower[0], lower[1], lower[2], upper[0], upper[1], upper[2]});
         thresholds.push_back(patch.threshold);
+        inverts.push_back(patch.invert ? 1.0 : 0.0);
         tie_tolerances.push_back(tie_tolerance_fraction*std::max({upper[0] - lower[0], upper[1] - lower[1], upper[2] - lower[2]}));
         if (mpiRank() == 0)
             std::printf("INFO :: %s: %d %s\n", patch.stl_path.c_str(), element_offsets.back() - element_offsets[element_offsets.size() - 2],
                         parameters.num_dims == 2 ? "outline edges" : "triangles");
     }
-    DeviceArray<real> device_elements, device_boxes, device_thresholds, device_tolerances;
+    DeviceArray<real> device_elements, device_boxes, device_thresholds, device_inverts, device_tolerances;
     DeviceArray<int> device_offsets;
     device_elements.copyFromHost(elements.data(), elements.size());
     device_boxes.copyFromHost(bounding_boxes.data(), bounding_boxes.size());
     device_thresholds.copyFromHost(thresholds.data(), thresholds.size());
+    device_inverts.copyFromHost(inverts.data(), inverts.size());
     device_tolerances.copyFromHost(tie_tolerances.data(), tie_tolerances.size());
     device_offsets.copyFromHost(element_offsets.data(), element_offsets.size());
     const GeometryView view = {this->num_patches, parameters.num_dims, device_elements.data(), device_offsets.data(),
-                               device_boxes.data(), device_thresholds.data(), device_tolerances.data()};
+                               device_boxes.data(), device_thresholds.data(), device_inverts.data(), device_tolerances.data()};
 
     // solid markers on every stored cell, so neighbors in the halo are known without an exchange
     markersKernel<<<numBlocks(grid.numStorage()), block_size>>>(grid, view, this->markers.data());

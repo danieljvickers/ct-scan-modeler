@@ -63,6 +63,7 @@ for direction in "xyz":
     SCALARS[f"loops_{direction}"] = Parameter(INTEGER, 1, f"stretching passes in {direction}")
     for side in ("beg", "end"):
         SCALARS[f"bc_{direction}%{side}"] = Parameter(INTEGER, -3, f"boundary condition at the {direction} {side}")
+        SCALARS[f"bc_{direction}%pres_{side}"] = Parameter(REAL, 0.0, "kinematic pressure held at an outflow (-3) boundary")
         for component in range(1, NUM_DIMS_MAX + 1):
             SCALARS[f"bc_{direction}%vel_in({component})"] = Parameter(REAL, 0.0, "Dirichlet inflow velocity")
 
@@ -90,6 +91,7 @@ FAMILIES = {
         "geometry": Parameter(STRING, None, "STL path, relative to case_dir; a flat STL in 2D"),
         "slip": Parameter(LOGICAL, False, "slip wall, only no-slip is supported"),
         "model_threshold": Parameter(REAL, 0.5, "winding number above which a cell is solid"),
+        "invert": Parameter(LOGICAL, False, "solid is everything outside the model, for flow inside a closed STL"),
         **{f"model_scale({k})": Parameter(REAL, 1.0, "model scale") for k in range(1, 4)},
         **{f"model_translate({k})": Parameter(REAL, 0.0, "model translation") for k in range(1, 4)},
         **{f"model_rotate({k})": Parameter(REAL, 0.0, "model rotation in radians") for k in range(1, 4)},

@@ -153,6 +153,6 @@ Pressure is kinematic (pressure over density) and density is 1.
 
 ## Extracting STLs from CT
 
-`./ctm.sh extract <ct.nii.gz> <out.stl>` builds a watertight binary STL of the airway lumen (`src/model_builder`). Each axial slice is thresholded and outside air is dropped, a trachea seed is found as a round air tube near the head end, and the threshold is raised from -950 HU until the connected volume jumps (leak into the lungs). The mask is surfaced with marching cubes, centered, and written in meters (`--units-per-mm`). `--labels` takes a ground truth airway mask instead. On AeroPath subject 1 the Dice against the provided airway labels is about 0.92 in a test crop.
+`./ctm.sh extract <ct.nii.gz> <out.stl>` builds a watertight binary STL of the airway lumen (`src/model_builder`). Each axial slice is thresholded and outside air is dropped, a trachea seed is found as a round air tube near the head end, and the threshold is raised from -950 HU until the connected volume jumps (leak into the lungs). The mask is surfaced with marching cubes, centered, and written in meters (`--units-per-mm`). `--prune` (default 0.01) drops disconnected mesh pieces smaller than that fraction of the largest. `--labels` takes a ground truth airway mask instead. On AeroPath subject 1 the Dice against the provided airway labels is about 0.92 in a test crop.
 
 ![Airway STL and axial slices at 1/4, 1/2, 3/4 of the airway height](docs/airway_extraction.png)

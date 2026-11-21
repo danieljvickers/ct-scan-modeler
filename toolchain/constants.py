@@ -2,7 +2,7 @@
 
 # boundary conditions
 BC_PERIODIC = -1       # wraps to the opposite side, both sides of a direction must be periodic
-BC_GHOST_EXTRAP = -3   # outflow: zero normal velocity gradient, zero pressure
+BC_GHOST_EXTRAP = -3   # outflow: zero normal velocity gradient, pressure held at bc_%pres_beg or bc_%pres_end (default 0)
 BC_SLIP_WALL = -15     # zero normal velocity, zero tangential velocity gradient
 BC_NO_SLIP_WALL = -16  # zero velocity
 BC_DIRICHLET = -17     # inflow at bc_%vel_in, zero pressure gradient

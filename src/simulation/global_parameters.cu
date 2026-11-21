@@ -56,6 +56,8 @@ Parameters readParameters(const std::string& path) {
         parameters.boundary[d][1] = input.integer("bc_" + name + "%end");
         CTM_REQUIRE((parameters.boundary[d][0] == bc_periodic) == (parameters.boundary[d][1] == bc_periodic),
                     "bc_%s%%beg and bc_%s%%end must both be periodic or neither", name.c_str(), name.c_str());
+        parameters.boundary_pressure[d][0] = input.number("bc_" + name + "%pres_beg");
+        parameters.boundary_pressure[d][1] = input.number("bc_" + name + "%pres_end");
         for (int component = 0; component < max_dims; ++component)
             parameters.inflow_velocity[d][component] = input.number("bc_" + name + "%vel_in(" + std::to_string(component + 1) + ")");
     }
@@ -106,6 +108,7 @@ Parameters readParameters(const std::string& path) {
             ImmersedPatch patch;
             patch.stl_path = input.text(prefix + "geometry");
             patch.threshold = input.number(prefix + "model_threshold");
+            patch.invert = input.logical(prefix + "invert");
             for (int d = 0; d < max_dims; ++d) {
                 const std::string index = "(" + std::to_string(d + 1) + ")";
                 patch.scale[d] = input.number(prefix + "model_scale" + index);
