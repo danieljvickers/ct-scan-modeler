@@ -74,6 +74,13 @@ struct Parameters {
 
     bool prim_vars_wrt;
     bool ib_force_wrt;
+    bool diag_wrt;
+    real bc_ramp_time;
+    int ib_fill_faces;
+    real ib_wall_upwind;
+    bool ib_block_faces;
+    int weno_order;       // 0 central convection, 3 WENO3
+    bool weno_wall_only;  // WENO only on faces next to the wall  // zero normal velocity and zero pressure flux on faces between fluid and solid cells  // upwind fraction of convection on faces next to the wall, 0 central  // fluid cells with at least this many solid face neighbors become solid, 0 off  // boundary values grow linearly from zero over this time, 0 for no ramp  // per step peak diagnostics with their cell locations
 };
 
 Parameters readParameters(const std::string& path);

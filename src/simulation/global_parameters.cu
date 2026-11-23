@@ -121,6 +121,14 @@ Parameters readParameters(const std::string& path) {
 
     parameters.prim_vars_wrt = input.logical("prim_vars_wrt");
     parameters.ib_force_wrt = input.logical("ib_force_wrt");
+    parameters.diag_wrt = input.logical("diag_wrt");
+    parameters.bc_ramp_time = input.number("bc_ramp_time");
+    parameters.ib_fill_faces = input.integer("ib_fill_faces");
+    parameters.ib_wall_upwind = input.number("ib_wall_upwind");
+    parameters.ib_block_faces = input.logical("ib_block_faces");
+    parameters.weno_order = input.integer("weno_order");
+    parameters.weno_wall_only = input.logical("weno_wall_only");
+    CTM_REQUIRE(parameters.weno_order == 0 || parameters.weno_order == 3, "weno_order must be 0 (central) or 3");
     return parameters;
 }
 

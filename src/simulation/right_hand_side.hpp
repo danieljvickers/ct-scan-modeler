@@ -25,6 +25,21 @@ constexpr StageCoefficients rk3_stages[] = {{8.0/15.0, 0.0, 8.0/15.0}, {5.0/12.0
 
 std::vector<StageCoefficients> rungeKuttaStages(int rk_order);
 
+// where a field is largest and what kind of cell that is, in global indices
+struct FieldPeak {
+    real value = 0.0;
+    bool found = false;
+    int index[3] = {-1, -1, -1};
+    real position[3] = {0.0, 0.0, 0.0};
+    int cell_type = -1;        // 0 fluid, 1 ghost, 2 solid interior, -1 unknown
+    int solid_neighbors = -1;  // of the six face neighbors
+    int on_domain_face = 0;
+};
+
+struct StepDiagnostics {
+    FieldPeak speed, cfl, divergence, pressure;
+};
+
 class FlowSolver {
 public:
     FlowSolver(const Parameters& parameters, const GridView& grid, ImmersedBoundaries& immersed_boundaries);
@@ -33,6 +48,7 @@ public:
     void advance();  // one time step through every stage
 
     real maxDivergence();
+    StepDiagnostics diagnostics(real dt);  // peak speed, convective CFL number, divergence, and pressure, with their cells
     bool isFinite();
     std::vector<real> forces();
     std::array<int, num_field_kinds> lastIterations() const { return this->iterations; }
@@ -43,7 +59,13 @@ public:
 
 private:
     void stage(int stage_index);
+    FieldPeak locatePeak(const signed char* cell_types);  // largest |value| of this->rhs
     void project(real stage_dt);
+    void rampBoundaryValues(real time);  // scale the boundary values for bc_ramp_time, then refresh the boundary offsets
+    void computeBoundaryOffsets();
+    const int* blockMarkers() const {  // solid markers when faces next to the wall are blocked, otherwise null
+        return this->parameters.ib_block_faces && this->immersed_boundaries.isActive() ? this->immersed_boundaries.geometry.markers.data() : nullptr;
+    }
     void fillVelocityHalos(DeviceArray<real>* fields);
     void applyOperator(const real* x, real* y, FieldKind kind, real shift, real scale, real ghost_sign);
 
@@ -59,6 +81,8 @@ private:
     Gmres gmres;
     HaloRule rules[num_field_kinds];
     HaloRule homogeneous_rules[num_field_kinds];
+    HaloRule full_rules[num_field_kinds];  // boundary values at full strength, before any ramp
+    real time = 0.0;
     std::vector<std::unique_ptr<SpectralSolver>> helmholtz_preconditioners;  // [stage][component]
     std::unique_ptr<SpectralSolver> poisson_preconditioner;
 

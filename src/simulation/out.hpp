@@ -20,6 +20,9 @@ public:
     void recordForces(int step, real time, const std::vector<real>& forces);
     void flushForces();
 
+    // D/diagnostics.dat, one line per step with the peaks of speed, CFL number, divergence, and pressure and the cells they sit in
+    void recordDiagnostics(int step, real time, real dt, const StepDiagnostics& diagnostics);
+
 private:
     void writeGrid(const ImmersedBoundaries& immersed_boundaries);
     void writeXdmf() const;
@@ -30,6 +33,7 @@ private:
     std::vector<std::pair<int, real>> saves;  // (step, time)
     std::vector<std::string> force_lines;
     std::FILE* force_file = nullptr;
+    std::FILE* diagnostics_file = nullptr;
     DeviceArray<real> compact;
 };
 

@@ -11,7 +11,7 @@ void setSide(HaloRule& rule, int direction, int side, real coefficient, real fac
 }
 
 // fill the halo layers of one side along one axis, over the whole storage extent of the other axes
-__global__ void fillSideKernel(GridView grid, real* field, int direction, int side, real coefficient, real value) {
+__global__ void fillSideKernel(GridView grid, real* field, int direction, int side, real coefficient, real value, const int* solid_markers) {
     const int other_1 = (direction + 1) % max_dims, other_2 = (direction + 2) % max_dims;
     const long plane = static_cast<long>(grid.storage[other_1])*grid.storage[other_2];
     const long thread = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
@@ -26,8 +26,10 @@ __global__ void fillSideKernel(GridView grid, real* field, int direction, int si
     halo_index[direction] = side == 0 ? -1 - layer : cells + layer;
     interior_index[direction] = side == 0 ? layer : cells - 1 - layer;  // mirror across the boundary face
 
-    field[grid.storageIndex(halo_index[0], halo_index[1], halo_index[2])] =
-        coefficient*field[grid.storageIndex(interior_index[0], interior_index[1], interior_index[2])] + value;
+    // a solid or ghost cell on the face takes no boundary value, the immersed boundary sets it
+    const long interior_cell = grid.storageIndex(interior_index[0], interior_index[1], interior_index[2]);
+    const real applied_value = solid_markers != nullptr && solid_markers[interior_cell] != 0 ? 0.0 : value;
+    field[grid.storageIndex(halo_index[0], halo_index[1], halo_index[2])] = coefficient*field[interior_cell] + applied_value;
 }
 
 // wrap the halo layers of a periodic axis held entirely by this rank
@@ -64,7 +66,7 @@ void fillPhysicalSides(const GridView& grid, const HaloRule& rule, real* field, 
         const bool is_physical = side == 0 ? grid.lower_boundary[direction] : grid.upper_boundary[direction];
         if (!is_physical) continue;
         fillSideKernel<<<numBlocks(num_threads), block_size>>>(grid, field, direction, side, rule.coefficient[direction][side],
-                                                              rule.value[direction][side]);
+                                                              rule.value[direction][side], rule.solid_markers);
     }
     CUDA_CHECK(cudaGetLastError());
 }

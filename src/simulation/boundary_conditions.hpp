@@ -10,6 +10,7 @@ enum FieldKind : int { field_velocity_x = 0, field_velocity_y = 1, field_velocit
 struct HaloRule {
     real coefficient[max_dims][2];  // [direction][begin, end], +1 zero gradient, -1 zero value at the face
     real value[max_dims][2];
+    const int* solid_markers = nullptr;  // when set, boundary values are not imposed on cells next to the face that are solid
 
     // same coefficients with zero values, used by the linear operators and the pressure correction
     HaloRule homogeneous() const {

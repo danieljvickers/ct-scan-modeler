@@ -31,9 +31,11 @@ public:
     long global_bilinear = 0;              // ghost points whose stencil was all fluid
     long global_fallback = 0;              // ghost points whose stencil was all solid, interpolated from their own fluid neighbors
     long global_trapped = 0;               // sealed fluid cells turned solid
+    long global_thin = 0;                  // fluid cells in one cell thick slots and pockets turned solid
 
 private:
     void fillTrappedFluid(const GridView& grid);
+    void fillThinFluid(const GridView& grid, int min_solid_faces);
 };
 
 #endif

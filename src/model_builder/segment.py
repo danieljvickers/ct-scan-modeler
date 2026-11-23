@@ -8,9 +8,9 @@ THRESHOLD_STEP_HU = 10.0
 LEAK_VOLUME_RATIO = 1.3  # airway volume growth between thresholds that signals leaking into the lungs
 SEED_THRESHOLD_HU = -900.0
 TRACHEA_AREA_MM2 = (60.0, 900.0)  # plausible axial cross section of an adult trachea
-SEED_SEARCH_SLICES = 300  # slices searched downward from the head end
-SEED_PERSIST_SLICES = 30  # a real trachea repeats at the same place in the slices below
-SEED_PERSIST_MM = 2.0
+SEED_SEARCH_MM = 150.0  # searched downward from the head end
+SEED_PERSIST_LENGTH_MM = 15.0  # a real trachea continues as a tube for at least this length below the seed
+SEED_DRIFT_MM = 2.0  # allowed shift of the tube center between neighboring slices, plus half a slice for the tilt
 CENTRAL_FRACTION = (0.25, 0.75)  # the trachea sits in the middle of the field of view
 
 
@@ -49,8 +49,11 @@ def tracheal_pockets(air_slice, spacing):
 
 
 def find_trachea_seed(smoothed, interior, spacing):
-    """Walk down from the head end to the first round air pocket that persists as a tube in the slices below."""
+    """Walk down from the head end to the first round air pocket that continues as a tube, followed slice by slice."""
     top = smoothed.shape[2] - 1
+    persist_slices = max(1, int(round(SEED_PERSIST_LENGTH_MM/spacing[2])))
+    search_slices = int(round(SEED_SEARCH_MM/spacing[2]))
+    drift = SEED_DRIFT_MM + 0.5*spacing[2]
     pocket_cache = {}
 
     def pockets_at(slice_index):
@@ -59,16 +62,20 @@ def find_trachea_seed(smoothed, interior, spacing):
             pocket_cache[slice_index] = tracheal_pockets(air, spacing)
         return pocket_cache[slice_index]
 
-    for slice_index in range(top, max(top - SEED_SEARCH_SLICES, SEED_PERSIST_SLICES) - 1, -1):
+    for slice_index in range(top, max(top - search_slices, persist_slices) - 1, -1):
         for area, center, inside in pockets_at(slice_index):
-            tube = True
-            for below in range(1, SEED_PERSIST_SLICES + 1):
-                tube = any(np.linalg.norm((other_center - center)*spacing[:2]) < SEED_PERSIST_MM
-                           and 0.5 < other_area/area < 2.0 for other_area, other_center, _ in pockets_at(slice_index - below))
-                if not tube:
+            current_area, current_center, tube = area, center, True
+            for below in range(1, persist_slices + 1):
+                matches = [(np.linalg.norm((other_center - current_center)*spacing[:2]), other_area, other_center)
+                           for other_area, other_center, _ in pockets_at(slice_index - below)
+                           if 0.5 < other_area/current_area < 2.0]
+                matches = [m for m in matches if m[0] < drift]
+                if not matches:
+                    tube = False
                     break
+                _, current_area, current_center = min(matches, key=lambda m: m[0])
             if tube:
-                return int(inside[0]), int(inside[1]), slice_index - SEED_PERSIST_SLICES//2
+                return int(inside[0]), int(inside[1]), slice_index - persist_slices//2
     raise RuntimeError("no trachea-like air tube found near the head end")
 
 

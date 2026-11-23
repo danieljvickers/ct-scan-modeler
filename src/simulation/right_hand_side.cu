@@ -1,5 +1,7 @@
 #include "right_hand_side.hpp"
 
+#include <algorithm>
+
 #include <cmath>
 
 namespace {
@@ -82,9 +84,73 @@ __global__ void helmholtzKernel(GridView grid, const real* x_storage, real shift
     y_owned[owned] = shift*x_storage[cell] + scale*laplacian(grid, x_storage, cell);
 }
 
-// conservative convection div(U q) with divergence free face velocities and central face values
+// with blocked faces a fluid cell exchanges no pressure flux with its solid neighbors, the discrete match of zero normal face velocity
+__global__ void blockedLaplacianKernel(GridView grid, const real* x_storage, const int* markers, real shift, real scale, real* y_owned) {
+    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (owned >= grid.numOwned()) return;
+    int i, j, k;
+    grid.ownedCell(owned, i, j, k);
+    const long cell = grid.storageIndex(i, j, k);
+    if (markers[cell] != 0) {
+        y_owned[owned] = shift*x_storage[cell] + scale*laplacian(grid, x_storage, cell);  // solid rows, ghost rows are overwritten later
+        return;
+    }
+    real value = 0.0;
+    for (int d = 0; d < numDims(grid); ++d)
+        for (int side = -1; side <= 1; side += 2) {
+            const long neighbor = cell + side*grid.stride(d);
+            if (markers[neighbor] == 0) value += (x_storage[neighbor] - x_storage[cell])/(grid.spacing[d]*grid.spacing[d]);
+        }
+    y_owned[owned] = shift*x_storage[cell] + scale*value;
+}
+
+// a cell is next to the wall if it or any face neighbor is solid
+__device__ inline bool nearWall(const GridView& grid, const int* markers, long cell) {
+    if (markers[cell] != 0) return true;
+    for (int d = 0; d < numDims(grid); ++d)
+        if (markers[cell - grid.stride(d)] != 0 || markers[cell + grid.stride(d)] != 0) return true;
+    return false;
+}
+
+// WENO3 face value from the upstream side, Jiang and Shu (1996); far, near, next are the cells two upstream, one upstream, and downstream
+__device__ inline real weno3(real far, real near, real next) {
+    constexpr real epsilon = 1.0e-6;
+    const real candidate_upwind = -0.5*far + 1.5*near;  // stencil {far, near}
+    const real candidate_central = 0.5*(near + next);   // stencil {near, next}
+    const real smooth_upwind = (near - far)*(near - far), smooth_central = (next - near)*(next - near);
+    const real alpha_upwind = (1.0/3.0)/((epsilon + smooth_upwind)*(epsilon + smooth_upwind));
+    const real alpha_central = (2.0/3.0)/((epsilon + smooth_central)*(epsilon + smooth_central));
+    return (alpha_upwind*candidate_upwind + alpha_central*candidate_central)/(alpha_upwind + alpha_central);
+}
+
+struct ConvectionScheme {
+    const int* markers;  // null without immersed boundaries
+    real wall_upwind;
+    int weno_order;
+    bool weno_wall_only;
+};
+
+// flux through the face between lower and upper: central by default, WENO3 or a blend toward upwind where asked
+__device__ inline real faceFlux(const GridView& grid, const ConvectionScheme& scheme, real face_velocity, long lower, long upper,
+                                const real* field) {
+    const real central = 0.5*(field[lower] + field[upper]);
+    const int* markers = scheme.markers;
+    const bool near_wall = markers != nullptr && (nearWall(grid, markers, lower) || nearWall(grid, markers, upper));
+    if (scheme.weno_order == 3 && (!scheme.weno_wall_only || near_wall)) {
+        const long step = upper - lower;
+        const real value = face_velocity >= 0.0 ? weno3(field[lower - step], field[lower], field[upper])
+                                                : weno3(field[upper + step], field[upper], field[lower]);
+        return face_velocity*value;
+    }
+    const real wall_upwind = scheme.wall_upwind;
+    if (wall_upwind <= 0.0 || !near_wall) return face_velocity*central;
+    const real upwind = face_velocity >= 0.0 ? field[lower] : field[upper];
+    return face_velocity*((1.0 - wall_upwind)*central + wall_upwind*upwind);
+}
+
+// conservative convection div(U q) with divergence free face velocities; both cells of a face compute the same flux
 __global__ void convectionKernel(GridView grid, const real* field, const real* faces_x, const real* faces_y, const real* faces_z,
-                                 real* convection) {
+                                 ConvectionScheme scheme, real* convection) {
     const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
     if (owned >= grid.numOwned()) return;
     int i, j, k;
@@ -94,8 +160,8 @@ __global__ void convectionKernel(GridView grid, const real* field, const real* f
     real value = 0.0;
     for (int d = 0; d < numDims(grid); ++d) {
         const long step = grid.stride(d);
-        const real upper_flux = faces[d][cell + step]*0.5*(field[cell] + field[cell + step]);
-        const real lower_flux = faces[d][cell]*0.5*(field[cell - step] + field[cell]);
+        const real upper_flux = faceFlux(grid, scheme, faces[d][cell + step], cell, cell + step, field);
+        const real lower_flux = faceFlux(grid, scheme, faces[d][cell], cell - step, cell, field);
         value += (upper_flux - lower_flux)/grid.spacing[d];
     }
     convection[owned] = value;
@@ -142,21 +208,31 @@ inline long numFaceThreads(const GridView& grid, int direction) {
     return count;
 }
 
-__global__ void interpolateFacesKernel(GridView grid, int direction, const real* field, real* faces) {
+// block_markers is null unless faces between fluid and solid cells carry no flow
+__device__ inline bool isBlockedFace(const int* block_markers, long lower, long upper) {
+    return block_markers != nullptr && (block_markers[lower] != 0 || block_markers[upper] != 0);
+}
+
+__global__ void interpolateFacesKernel(GridView grid, int direction, const real* field, const int* block_markers, real* faces) {
     int index[max_dims];
     if (!faceCell(grid, direction, blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x, index)) return;
     const long upper = grid.storageIndex(index[0], index[1], index[2]);
-    faces[upper] = 0.5*(field[upper - grid.stride(direction)] + field[upper]);
+    const long lower = upper - grid.stride(direction);
+    faces[upper] = isBlockedFace(block_markers, lower, upper) ? 0.0 : 0.5*(field[lower] + field[upper]);
 }
 
 // interpolated tentative velocity with the cell pressure gradient swapped for the compact face gradient on interior fluid faces
 __global__ void predictedFacesKernel(GridView grid, int direction, const real* predicted, const real* pressure, const int* markers,
-                                     real stage_dt, real* faces) {
+                                     const int* block_markers, real stage_dt, real* faces) {
     int index[max_dims];
     if (!faceCell(grid, direction, blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x, index)) return;
     const long step = grid.stride(direction);
     const long upper = grid.storageIndex(index[0], index[1], index[2]);
     const long lower = upper - step;
+    if (isBlockedFace(block_markers, lower, upper)) {
+        faces[upper] = 0.0;
+        return;
+    }
     real value = 0.5*(predicted[lower] + predicted[upper]);
     const int global_face = grid.offset[direction] + index[direction];
     const bool is_interior = grid.periodic[direction] || (global_face > 0 && global_face < grid.global_cells[direction]);
@@ -185,11 +261,13 @@ __global__ void divergenceKernel(GridView grid, const real* faces_x, const real*
     divergence[owned] = scale*value;
 }
 
-__global__ void correctFacesKernel(GridView grid, int direction, const real* correction, real stage_dt, real* faces) {
+__global__ void correctFacesKernel(GridView grid, int direction, const real* correction, const int* block_markers, real stage_dt, real* faces) {
     int index[max_dims];
     if (!faceCell(grid, direction, blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x, index)) return;
     const long upper = grid.storageIndex(index[0], index[1], index[2]);
-    faces[upper] -= stage_dt*(correction[upper] - correction[upper - grid.stride(direction)])/grid.spacing[direction];
+    const long lower = upper - grid.stride(direction);
+    if (isBlockedFace(block_markers, lower, upper)) return;
+    faces[upper] -= stage_dt*(correction[upper] - correction[lower])/grid.spacing[direction];
 }
 
 __global__ void correctVelocityKernel(GridView grid, int component, const real* predicted, const real* correction, real stage_dt,
@@ -226,6 +304,33 @@ real maxAbsolute(long count, const real* values, const signed char* cell_types, 
     return allreduceMax(local);
 }
 
+enum DiagnosticQuantity : int { quantity_speed = 0, quantity_cfl = 1, quantity_pressure = 2 };
+
+// one diagnostic value per owned cell, the CFL number is the sum over directions of |u_d| dt / dx_d
+__global__ void diagnosticValuesKernel(GridView grid, int quantity, real dt, const real* u, const real* v, const real* w, const real* pressure,
+                                       real* compact) {
+    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (owned >= grid.numOwned()) return;
+    int i, j, k;
+    grid.ownedCell(owned, i, j, k);
+    const long cell = grid.storageIndex(i, j, k);
+    const real speeds[max_dims] = {u[cell], grid.num_dims > 1 ? v[cell] : 0.0, grid.num_dims > 2 ? w[cell] : 0.0};
+    if (quantity == quantity_speed) {
+        compact[owned] = sqrt(speeds[0]*speeds[0] + speeds[1]*speeds[1] + speeds[2]*speeds[2]);
+    } else if (quantity == quantity_cfl) {
+        compact[owned] = dt*(fabs(speeds[0])/grid.spacing[0] + fabs(speeds[1])/grid.spacing[1] + fabs(speeds[2])/grid.spacing[2]);
+    } else {
+        compact[owned] = pressure[cell];
+    }
+}
+
+// lowest owned index whose |value| equals the target
+__global__ void findFirstKernel(long count, const real* values, real target, const signed char* cell_types, unsigned long long* first) {
+    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (owned >= count || (cell_types != nullptr && cell_types[owned] != cell_fluid)) return;
+    if (fabs(values[owned]) == target) atomicMin(first, static_cast<unsigned long long>(owned));
+}
+
 }  // namespace
 
 std::vector<StageCoefficients> rungeKuttaStages(int rk_order) {
@@ -257,7 +362,9 @@ FlowSolver::FlowSolver(const Parameters& parameters, const GridView& grid, Immer
 
     for (int kind = 0; kind < num_field_kinds; ++kind) {
         this->rules[kind] = makeHaloRule(parameters, static_cast<FieldKind>(kind));
+        if (immersed_boundaries.isActive()) this->rules[kind].solid_markers = immersed_boundaries.geometry.markers.data();
         this->homogeneous_rules[kind] = this->rules[kind].homogeneous();
+        this->full_rules[kind] = this->rules[kind];
     }
 
     // one Helmholtz preconditioner per stage and component, one Poisson preconditioner
@@ -270,13 +377,27 @@ FlowSolver::FlowSolver(const Parameters& parameters, const GridView& grid, Immer
     this->poisson_preconditioner = std::make_unique<SpectralSolver>(grid, this->transpose, this->transforms,
                                                                     this->homogeneous_rules[field_pressure], 0.0, 1.0);
 
-    // laplacian of the boundary values alone, the constant part of the velocity operators
+    this->computeBoundaryOffsets();
+}
+
+// laplacian of the boundary values alone, the constant part of the velocity operators
+void FlowSolver::computeBoundaryOffsets() {
     for (int component = 0; component < this->num_dims; ++component) {
         this->operator_input.fillZero();
-        fillHalos(grid, this->rules[component], this->exchange, this->operator_input.data());
-        helmholtzKernel<<<numBlocks(num_owned), block_size>>>(grid, this->operator_input.data(), 0.0, 1.0, this->boundary_offsets[component].data());
+        fillHalos(this->grid, this->rules[component], this->exchange, this->operator_input.data());
+        helmholtzKernel<<<numBlocks(this->grid.numOwned()), block_size>>>(this->grid, this->operator_input.data(), 0.0, 1.0,
+                                                                           this->boundary_offsets[component].data());
     }
     CUDA_CHECK(cudaGetLastError());
+}
+
+void FlowSolver::rampBoundaryValues(real time) {
+    if (this->parameters.bc_ramp_time <= 0.0) return;
+    const real fraction = std::min(1.0, time/this->parameters.bc_ramp_time);
+    for (int kind = 0; kind < num_field_kinds; ++kind)
+        for (int d = 0; d < max_dims; ++d)
+            for (int side = 0; side < 2; ++side) this->rules[kind].value[d][side] = fraction*this->full_rules[kind].value[d][side];
+    this->computeBoundaryOffsets();
 }
 
 void FlowSolver::fillVelocityHalos(DeviceArray<real>* fields) {
@@ -288,12 +409,17 @@ void FlowSolver::applyOperator(const real* x, real* y, FieldKind kind, real shif
     const GridView& g = this->grid;
     scatterOwnedKernel<<<numBlocks(g.numOwned()), block_size>>>(g, x, this->operator_input.data());
     fillHalos(g, this->homogeneous_rules[kind], this->exchange, this->operator_input.data());
-    helmholtzKernel<<<numBlocks(g.numOwned()), block_size>>>(g, this->operator_input.data(), shift, scale, y);
+    if (kind == field_pressure && this->blockMarkers() != nullptr)
+        blockedLaplacianKernel<<<numBlocks(g.numOwned()), block_size>>>(g, this->operator_input.data(), this->blockMarkers(), shift, scale, y);
+    else
+        helmholtzKernel<<<numBlocks(g.numOwned()), block_size>>>(g, this->operator_input.data(), shift, scale, y);
     CUDA_CHECK(cudaGetLastError());
     this->immersed_boundaries.applyGhostRows(this->operator_input.data(), y, shift, scale, this->homogeneous_rules[kind], ghost_sign);
 }
 
 void FlowSolver::initialize() {
+    this->time = this->parameters.t_step_start*this->parameters.dt;
+    this->rampBoundaryValues(this->time);
     const GridView& g = this->grid;
     InitialPatches initial;
     initial.count = static_cast<int>(this->parameters.initial_patches.size());
@@ -309,7 +435,7 @@ void FlowSolver::initialize() {
     this->fillVelocityHalos(this->velocity);
     fillHalos(g, this->rules[field_pressure], this->exchange, this->pressure.data());
     for (int d = 0; d < this->num_dims; ++d) {
-        interpolateFacesKernel<<<numBlocks(numFaceThreads(g, d)), block_size>>>(g, d, this->velocity[d].data(), this->faces[d].data());
+        interpolateFacesKernel<<<numBlocks(numFaceThreads(g, d)), block_size>>>(g, d, this->velocity[d].data(), this->blockMarkers(), this->faces[d].data());
         CUDA_CHECK(cudaMemcpy(this->predicted[d].data(), this->velocity[d].data(), g.numStorage()*sizeof(real), cudaMemcpyDeviceToDevice));
     }
     DeviceArray<real> initial_pressure(g.numStorage());
@@ -319,7 +445,10 @@ void FlowSolver::initialize() {
 }
 
 void FlowSolver::advance() {
+    // boundary values at the end of the step while the ramp is on
+    if (this->time < this->parameters.bc_ramp_time) this->rampBoundaryValues(this->time + this->parameters.dt);
     for (int stage_index = 0; stage_index < static_cast<int>(this->stages.size()); ++stage_index) this->stage(stage_index);
+    this->time += this->parameters.dt;
 }
 
 void FlowSolver::stage(int stage_index) {
@@ -331,9 +460,11 @@ void FlowSolver::stage(int stage_index) {
     const signed char* cell_types = this->immersed_boundaries.geometry.cell_types.data();
 
     // explicit convection with the current divergence free face velocities
+    const ConvectionScheme scheme = {this->immersed_boundaries.isActive() ? this->immersed_boundaries.geometry.markers.data() : nullptr,
+                                     this->parameters.ib_wall_upwind, this->parameters.weno_order, this->parameters.weno_wall_only};
     for (int component = 0; component < this->num_dims; ++component)
         convectionKernel<<<numBlocks(num_owned), block_size>>>(g, this->velocity[component].data(), this->faces[0].data(), this->faces[1].data(),
-                                                               this->faces[2].data(), this->convection[component].data());
+                                                               this->faces[2].data(), scheme, this->convection[component].data());
 
     // get tentative velocity with the old pressure gradient, Crank-Nicolson diffusion solved by GMRES
     const PredictorTerms terms = {this->parameters.dt, coefficients.gamma, coefficients.zeta, coefficients.alpha, this->parameters.kinematic_viscosity};
@@ -355,7 +486,7 @@ void FlowSolver::stage(int stage_index) {
     // face velocities with the cell pressure gradient swapped for the compact face gradient
     for (int d = 0; d < this->num_dims; ++d)
         predictedFacesKernel<<<numBlocks(numFaceThreads(g, d)), block_size>>>(g, d, this->predicted[d].data(), this->pressure.data(),
-                                                                              this->immersed_boundaries.geometry.markers.data(), stage_dt,
+                                                                              this->immersed_boundaries.geometry.markers.data(), this->blockMarkers(), stage_dt,
                                                                               this->faces[d].data());
     CUDA_CHECK(cudaGetLastError());
     // with a single projection the earlier stages carry the tentative velocity forward, the last one removes the
@@ -390,7 +521,8 @@ void FlowSolver::project(real stage_dt) {
     scatterOwnedKernel<<<numBlocks(num_owned), block_size>>>(g, this->pressure_correction.data(), this->correction_field.data());
     fillHalos(g, this->homogeneous_rules[field_pressure], this->exchange, this->correction_field.data());
     for (int d = 0; d < this->num_dims; ++d) {
-        correctFacesKernel<<<numBlocks(numFaceThreads(g, d)), block_size>>>(g, d, this->correction_field.data(), stage_dt, this->faces[d].data());
+        correctFacesKernel<<<numBlocks(numFaceThreads(g, d)), block_size>>>(g, d, this->correction_field.data(), this->blockMarkers(), stage_dt,
+                                                                           this->faces[d].data());
         correctVelocityKernel<<<numBlocks(num_owned), block_size>>>(g, d, this->predicted[d].data(), this->correction_field.data(), stage_dt,
                                                                     this->velocity[d].data());
     }
@@ -409,6 +541,87 @@ real FlowSolver::maxDivergence() {
                                                                        this->faces[2].data(), this->immersed_boundaries.geometry.cell_types.data(),
                                                                        1.0, true, this->rhs.data());
     return maxAbsolute(this->grid.numOwned(), this->rhs.data(), nullptr, this->reduction);
+}
+
+FieldPeak FlowSolver::locatePeak(const signed char* cell_types) {
+    FieldPeak peak;
+    const long count = this->grid.numOwned();
+    peak.value = maxAbsolute(count, this->rhs.data(), cell_types, this->reduction);
+    if (!std::isfinite(peak.value)) return peak;
+
+    DeviceArray<unsigned long long> first(1);
+    const unsigned long long none = ~0ULL;
+    first.copyFromHost(&none, 1);
+    findFirstKernel<<<numBlocks(count), block_size>>>(count, this->rhs.data(), peak.value, cell_types, first.data());
+    CUDA_CHECK(cudaGetLastError());
+    unsigned long long local;
+    first.copyToHost(&local);
+
+    // only the rank holding the cell contributes, the sum then carries its description to every rank
+    real packed[8] = {0, 0, 0, 0, 0, 0, 0, 0};  // found, global i j k, cell type + 1, solid neighbors + 1, on face
+    if (local != none) {
+        int i, j, k;
+        this->grid.ownedCell(static_cast<long>(local), i, j, k);
+        const Geometry& geometry = this->immersed_boundaries.geometry;
+        signed char type = -1;
+        int solid_neighbors = -1;
+        if (this->immersed_boundaries.isActive()) {
+            CUDA_CHECK(cudaMemcpy(&type, geometry.cell_types.data() + local, sizeof(type), cudaMemcpyDeviceToHost));
+            solid_neighbors = 0;
+            for (int d = 0; d < this->num_dims; ++d)
+                for (int side = -1; side <= 1; side += 2) {
+                    int neighbor[max_dims] = {i, j, k};
+                    neighbor[d] += side;
+                    int marker;
+                    CUDA_CHECK(cudaMemcpy(&marker, geometry.markers.data() + this->grid.storageIndex(neighbor[0], neighbor[1], neighbor[2]),
+                                          sizeof(marker), cudaMemcpyDeviceToHost));
+                    solid_neighbors += marker != 0;
+                }
+        }
+        const int local_index[max_dims] = {i, j, k};
+        int on_face = 0;
+        for (int d = 0; d < this->num_dims; ++d) {
+            const int global_index = local_index[d] + this->grid.offset[d];
+            on_face |= global_index == 0 || global_index == this->grid.global_cells[d] - 1;
+        }
+        packed[0] = 1;
+        for (int d = 0; d < max_dims; ++d) packed[1 + d] = local_index[d] + this->grid.offset[d];
+        packed[4] = type + 1;
+        packed[5] = solid_neighbors + 1;
+        packed[6] = on_face;
+    }
+    allreduceSum(packed, 8);
+    peak.found = packed[0] > 0.5;
+    if (!peak.found) return peak;
+    for (int d = 0; d < max_dims; ++d) {
+        peak.index[d] = static_cast<int>(packed[1 + d] + 0.5);
+        peak.position[d] = this->grid.origin[d] + (peak.index[d] + 0.5)*this->grid.spacing[d];
+    }
+    peak.cell_type = static_cast<int>(packed[4] + 0.5) - 1;
+    peak.solid_neighbors = static_cast<int>(packed[5] + 0.5) - 1;
+    peak.on_domain_face = packed[6] > 0.5;
+    return peak;
+}
+
+StepDiagnostics FlowSolver::diagnostics(real dt) {
+    StepDiagnostics result;
+    const long count = this->grid.numOwned();
+    const signed char* cell_types = this->immersed_boundaries.isActive() ? this->immersed_boundaries.geometry.cell_types.data() : nullptr;
+    auto fill = [&](int quantity) {
+        diagnosticValuesKernel<<<numBlocks(count), block_size>>>(this->grid, quantity, dt, this->velocity[0].data(), this->velocity[1].data(),
+                                                                 this->velocity[2].data(), this->pressure.data(), this->rhs.data());
+        CUDA_CHECK(cudaGetLastError());
+    };
+    fill(quantity_speed);
+    result.speed = this->locatePeak(nullptr);
+    fill(quantity_cfl);
+    result.cfl = this->locatePeak(nullptr);
+    divergenceKernel<<<numBlocks(count), block_size>>>(this->grid, this->faces[0].data(), this->faces[1].data(), this->faces[2].data(),
+                                                       this->immersed_boundaries.geometry.cell_types.data(), 1.0, true, this->rhs.data());
+    result.divergence = this->locatePeak(nullptr);
+    fill(quantity_pressure);
+    result.pressure = this->locatePeak(cell_types);
+    return result;
 }
 
 bool FlowSolver::isFinite() {

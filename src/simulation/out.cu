@@ -88,6 +88,13 @@ Output::Output(const Parameters& parameters, const GridView& grid, const Immerse
     this->compact.resize(grid.numOwned());
     this->writeGrid(immersed_boundaries);
 
+    if (mpiRank() == 0 && parameters.diag_wrt) {
+        this->diagnostics_file = std::fopen((this->output_dir + "/diagnostics.dat").c_str(), "w");
+        CTM_REQUIRE(this->diagnostics_file != nullptr, "could not open %s/diagnostics.dat", this->output_dir.c_str());
+        std::fprintf(this->diagnostics_file, "# step time dt, then for speed, cfl, divergence, pressure: value i j k x y z cell_type solid_neighbors on_domain_face\n");
+        std::fprintf(this->diagnostics_file, "# cell_type 0 fluid, 1 ghost, 2 solid interior; i j k are global cell indices; x y z are cell centers\n");
+    }
+
     if (mpiRank() == 0 && parameters.ib && parameters.ib_force_wrt) {
         this->force_file = std::fopen((this->output_dir + "/ib_forces.dat").c_str(), "w");
         CTM_REQUIRE(this->force_file != nullptr, "could not open %s/ib_forces.dat", this->output_dir.c_str());
@@ -101,6 +108,7 @@ Output::Output(const Parameters& parameters, const GridView& grid, const Immerse
 Output::~Output() {
     this->flushForces();
     if (this->force_file) std::fclose(this->force_file);
+    if (this->diagnostics_file) std::fclose(this->diagnostics_file);
 }
 
 void Output::writeGrid(const ImmersedBoundaries& immersed_boundaries) {
@@ -192,4 +200,14 @@ void Output::flushForces() {
     for (const std::string& line : this->force_lines) std::fprintf(this->force_file, "%s\n", line.c_str());
     std::fflush(this->force_file);
     this->force_lines.clear();
+}
+
+void Output::recordDiagnostics(int step, real time, real dt, const StepDiagnostics& diagnostics) {
+    if (this->diagnostics_file == nullptr) return;
+    std::fprintf(this->diagnostics_file, "%d %.8e %.6e", step, time, dt);
+    for (const FieldPeak* peak : {&diagnostics.speed, &diagnostics.cfl, &diagnostics.divergence, &diagnostics.pressure})
+        std::fprintf(this->diagnostics_file, " %.8e %d %d %d %.6e %.6e %.6e %d %d %d", peak->value, peak->index[0], peak->index[1], peak->index[2],
+                     peak->position[0], peak->position[1], peak->position[2], peak->cell_type, peak->solid_neighbors, peak->on_domain_face);
+    std::fprintf(this->diagnostics_file, "\n");
+    std::fflush(this->diagnostics_file);  // the last lines before a crash are the ones that matter
 }

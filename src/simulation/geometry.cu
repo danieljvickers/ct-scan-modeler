@@ -313,6 +313,35 @@ __global__ void fillTrappedKernel(GridView grid, int* markers, const real* reach
     atomicAdd(num_filled, 1);
 }
 
+// a fluid cell with enough solid face neighbors sits in a slot or pocket about one cell thick, flag it with a neighboring patch id
+__global__ void flagThinFluidKernel(GridView grid, const int* markers, int min_solid_faces, int* flags, int* num_flagged) {
+    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (owned >= grid.numOwned()) return;
+    int index[max_dims];
+    grid.ownedCell(owned, index[0], index[1], index[2]);
+    const long cell = grid.storageIndex(index[0], index[1], index[2]);
+    flags[owned] = 0;
+    if (markers[cell] != 0) return;
+    int solid_faces = 0, patch = 1;
+    for (int d = 0; d < numDims(grid); ++d)
+        for (int side = -1; side <= 1; side += 2) {
+            const int neighbor = markers[cell + side*grid.stride(d)];
+            if (neighbor != 0) ++solid_faces, patch = neighbor;
+        }
+    if (solid_faces < min_solid_faces) return;
+    flags[owned] = patch;
+    atomicAdd(num_flagged, 1);
+}
+
+// applied after the whole sweep, so the result does not depend on thread order
+__global__ void applyThinFluidKernel(GridView grid, const int* flags, int* markers) {
+    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (owned >= grid.numOwned() || flags[owned] == 0) return;
+    int index[max_dims];
+    grid.ownedCell(owned, index[0], index[1], index[2]);
+    markers[grid.storageIndex(index[0], index[1], index[2])] = flags[owned];
+}
+
 __global__ void markersToRealKernel(long count, const int* markers, real* values) {
     const long cell = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
     if (cell < count) values[cell] = markers[cell];
@@ -530,6 +559,7 @@ Geometry::Geometry(const Parameters& parameters, const GridView& grid) {
     // solid markers on every stored cell, so neighbors in the halo are known without an exchange
     markersKernel<<<numBlocks(grid.numStorage()), block_size>>>(grid, view, this->markers.data());
     CUDA_CHECK(cudaGetLastError());
+    this->fillThinFluid(grid, parameters.ib_fill_faces);
     this->fillTrappedFluid(grid);
 
     // classify owned cells and list the ghost points
@@ -598,4 +628,27 @@ void Geometry::fillTrappedFluid(const GridView& grid) {
     exchange.exchange(reachable.data());
     realToMarkersKernel<<<numBlocks(grid.numStorage()), block_size>>>(grid.numStorage(), reachable.data(), this->markers.data());
     CUDA_CHECK(cudaGetLastError());
+}
+
+// repeat until no fluid cell has min_solid_faces solid face neighbors, since each fill can create new ones
+void Geometry::fillThinFluid(const GridView& grid, int min_solid_faces) {
+    if (min_solid_faces <= 0) return;
+    HaloExchange exchange(grid);
+    DeviceArray<int> flags(grid.numOwned()), num_flagged(1);
+    DeviceArray<real> transfer(grid.numStorage());
+    for (;;) {
+        num_flagged.fillZero();
+        flagThinFluidKernel<<<numBlocks(grid.numOwned()), block_size>>>(grid, this->markers.data(), min_solid_faces, flags.data(), num_flagged.data());
+        int local;
+        num_flagged.copyToHost(&local);
+        const long flagged = static_cast<long>(allreduceSum(static_cast<real>(local)));
+        if (flagged == 0) break;
+        this->global_thin += flagged;
+        applyThinFluidKernel<<<numBlocks(grid.numOwned()), block_size>>>(grid, flags.data(), this->markers.data());
+        // neighbor ranks see the filled cells in their halos
+        markersToRealKernel<<<numBlocks(grid.numStorage()), block_size>>>(grid.numStorage(), this->markers.data(), transfer.data());
+        exchange.exchange(transfer.data());
+        realToMarkersKernel<<<numBlocks(grid.numStorage()), block_size>>>(grid.numStorage(), transfer.data(), this->markers.data());
+        CUDA_CHECK(cudaGetLastError());
+    }
 }
