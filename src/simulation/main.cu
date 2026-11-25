@@ -5,6 +5,8 @@
 
 namespace {
 
+constexpr int tile_reach = halo_width + 1;  // tiles within this many cells of the fluid are stored
+
 // ranks on the same node share its GPUs round robin
 int selectDevice() {
     MPI_Comm node_comm;
@@ -29,7 +31,8 @@ void run(const char* input_path) {
     const bool is_root = mpiRank() == 0;
     const Parameters parameters = readParameters(input_path);
     checkCaseOptimization(parameters);
-    const GridView grid = makeGrid(parameters);
+    const GridView dense_grid = makeGrid(parameters);
+    GridView grid = dense_grid;
     const long global_cells = static_cast<long>(grid.global_cells[0])*grid.global_cells[1]*grid.global_cells[2];
     if (is_root) {
         std::printf("INFO :: %dD, %d x %d x %d cells on %d GPU(s), %s build\n", grid.num_dims, grid.global_cells[0], grid.global_cells[1],
@@ -46,7 +49,20 @@ void run(const char* input_path) {
 
     // set up the bodies, the solver, and the output
     real setup_start = MPI_Wtime();
-    ImmersedBoundaries immersed_boundaries(parameters, grid);
+    ImmersedBoundaries immersed_boundaries(parameters, dense_grid);
+
+    // the bodies are found on the dense grid, then only the tiles near the fluid are kept
+    TileSet tiles;
+    if (parameters.tiled_grid) {
+        GridView shape = dense_grid;
+        for (int d = 0; d < max_dims; ++d) shape.tile_shift[d] = d < grid.num_dims ? (grid.num_dims == 3 ? 3 : 4) : 0;
+        tileCounts(dense_grid, shape.tile_shift, shape.tiles);
+        grid = tiles.build(dense_grid, shape.tile_shift, immersed_boundaries.geometry.activeTiles(dense_grid, shape, tile_reach));
+        immersed_boundaries.convertToTiles(grid);
+        if (is_root)
+            std::printf("INFO :: tiled grid keeps %ld of %ld tiles, %.1f%% of the cells\n", tiles.numActive(),
+                        static_cast<long>(shape.tiles[0])*shape.tiles[1]*shape.tiles[2], 100.0*grid.numStorage()/dense_grid.numStorage());
+    }
     if (is_root && parameters.ib)
         std::printf("INFO :: %ld ghost points, %ld bilinear, %ld from their own neighbors, the rest inverse distance; %ld sealed fluid cells filled\n",
                     immersed_boundaries.geometry.global_ghost_points, immersed_boundaries.geometry.global_bilinear,

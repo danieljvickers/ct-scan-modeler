@@ -126,6 +126,8 @@ Parameters readParameters(const std::string& path) {
     parameters.ib_fill_faces = input.integer("ib_fill_faces");
     parameters.ib_wall_upwind = input.number("ib_wall_upwind");
     parameters.ib_block_faces = input.logical("ib_block_faces");
+    parameters.tiled_grid = input.logical("tiled_grid");
+    CTM_REQUIRE(!parameters.tiled_grid || mpiSize() == 1, "tiled_grid runs on one GPU");
     parameters.weno_order = input.integer("weno_order");
     parameters.weno_wall_only = input.logical("weno_wall_only");
     CTM_REQUIRE(parameters.weno_order == 0 || parameters.weno_order == 3, "weno_order must be 0 (central) or 3");

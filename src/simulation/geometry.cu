@@ -652,3 +652,99 @@ void Geometry::fillThinFluid(const GridView& grid, int min_solid_faces) {
         CUDA_CHECK(cudaGetLastError());
     }
 }
+
+namespace {
+
+// flag every tile within reach cells of an owned fluid cell, halos included, so all stencils of the fluid find their cells
+__global__ void activeTilesKernel(GridView dense, const int* markers, int reach, GridView tiled_shape, int* active) {
+    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (owned >= dense.numOwned()) return;
+    int index[max_dims];
+    dense.ownedCell(owned, index[0], index[1], index[2]);
+    if (markers[dense.storageIndex(index[0], index[1], index[2])] != 0) return;
+    int lower[max_dims], upper[max_dims];
+    for (int d = 0; d < max_dims; ++d) {
+        const int position = index[d] + dense.halo[d];
+        const int width = d < dense.num_dims ? reach : 0;
+        lower[d] = max(position - width, 0) >> tiled_shape.tile_shift[d];
+        upper[d] = min(position + width, dense.storage[d] - 1) >> tiled_shape.tile_shift[d];
+    }
+    for (int z = lower[2]; z <= upper[2]; ++z)
+        for (int y = lower[1]; y <= upper[1]; ++y)
+            for (int x = lower[0]; x <= upper[0]; ++x) active[(static_cast<long>(z)*tiled_shape.tiles[1] + y)*tiled_shape.tiles[0] + x] = 1;
+}
+
+__global__ void tileMarkersKernel(GridView dense, GridView tiled, const int* dense_markers, int* markers) {
+    const long cell = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    int i, j, k;
+    if (cell >= tiled.numStorageThreads() || !tiled.storageCell(cell, i, j, k)) return;
+    markers[cell] = dense_markers[dense.storageIndex(i, j, k)];
+}
+
+// owned cells keep their type, the rest of the tiled vector reads as solid interior
+__global__ void tileCellTypesKernel(GridView dense, GridView tiled, const signed char* dense_types, signed char* types) {
+    const long cell = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (cell >= tiled.numStorage()) return;
+    int i, j, k;
+    const bool stored = cell < tiled.numStorageThreads() && tiled.storageCell(cell, i, j, k);
+    types[cell] = stored && tiled.isOwned(i, j, k) ? dense_types[dense.ownedIndex(i, j, k)] : cell_interior;
+}
+
+__device__ inline long tiledCell(const GridView& dense, const GridView& tiled, long dense_cell) {
+    int i, j, k;
+    dense.storageCell(dense_cell, i, j, k);
+    return tiled.storageIndex(i, j, k);
+}
+
+// ghost points and image stencils renumbered into tiled storage; a stencil cell with weight that is not stored is an error
+__global__ void tileGhostPointsKernel(GridView dense, GridView tiled, int count, long* storage_cells, long* owned_cells, long* stencil_cells,
+                                      const real* weights, int* missing) {
+    const int ghost = blockIdx.x*blockDim.x + threadIdx.x;
+    if (ghost >= count) return;
+    storage_cells[ghost] = tiledCell(dense, tiled, storage_cells[ghost]);
+    int i, j, k;
+    dense.ownedCell(owned_cells[ghost], i, j, k);
+    owned_cells[ghost] = tiled.ownedIndex(i, j, k);
+    if (storage_cells[ghost] == tiled.emptyCell()) atomicAdd(missing, 1);
+    for (int corner = 0; corner < max_stencil; ++corner) {
+        const long cell = tiledCell(dense, tiled, stencil_cells[ghost*max_stencil + corner]);
+        stencil_cells[ghost*max_stencil + corner] = cell;
+        if (cell == tiled.emptyCell() && weights[ghost*max_stencil + corner] != 0.0) atomicAdd(missing, 1);
+    }
+}
+
+}  // namespace
+
+std::vector<char> Geometry::activeTiles(const GridView& dense, const GridView& tiled_shape, int reach) const {
+    const long total = static_cast<long>(tiled_shape.tiles[0])*tiled_shape.tiles[1]*tiled_shape.tiles[2];
+    DeviceArray<int> active(total);
+    activeTilesKernel<<<numBlocks(dense.numOwned()), block_size>>>(dense, this->markers.data(), reach, tiled_shape, active.data());
+    CUDA_CHECK(cudaGetLastError());
+    std::vector<int> host(total);
+    active.copyToHost(host.data());
+    return std::vector<char>(host.begin(), host.end());
+}
+
+void Geometry::convertToTiles(const GridView& dense, const GridView& tiled, bool has_bodies) {
+    DeviceArray<int> tiled_markers(tiled.numStorage());
+    tileMarkersKernel<<<numBlocks(tiled.numStorageThreads()), block_size>>>(dense, tiled, this->markers.data(), tiled_markers.data());
+    if (has_bodies) {
+        const int solid = 1;  // every cell that is not stored reads as solid
+        CUDA_CHECK(cudaMemcpy(tiled_markers.data() + tiled.emptyCell(), &solid, sizeof(int), cudaMemcpyHostToDevice));
+    }
+    DeviceArray<signed char> tiled_types(tiled.numStorage());
+    tileCellTypesKernel<<<numBlocks(tiled.numStorage()), block_size>>>(dense, tiled, this->cell_types.data(), tiled_types.data());
+    CUDA_CHECK(cudaGetLastError());
+    this->markers = std::move(tiled_markers);
+    this->cell_types = std::move(tiled_types);
+
+    GhostPoints& ghosts = this->ghost_points;
+    if (ghosts.count == 0) return;
+    DeviceArray<int> missing(1);
+    tileGhostPointsKernel<<<numBlocks(ghosts.count), block_size>>>(dense, tiled, ghosts.count, ghosts.storage_cells.data(), ghosts.owned_cells.data(),
+                                                                    ghosts.stencil_cells.data(), ghosts.weights.data(), missing.data());
+    CUDA_CHECK(cudaGetLastError());
+    int host_missing;
+    missing.copyToHost(&host_missing);
+    CTM_REQUIRE(host_missing == 0, "%d ghost cells or image stencil cells fall outside the stored tiles", host_missing);
+}

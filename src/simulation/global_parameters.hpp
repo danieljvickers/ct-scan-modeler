@@ -79,6 +79,7 @@ struct Parameters {
     int ib_fill_faces;
     real ib_wall_upwind;
     bool ib_block_faces;
+    bool tiled_grid;      // store only tiles near the fluid and precondition with multigrid, one GPU
     int weno_order;       // 0 central convection, 3 WENO3
     bool weno_wall_only;  // WENO only on faces next to the wall  // zero normal velocity and zero pressure flux on faces between fluid and solid cells  // upwind fraction of convection on faces next to the wall, 0 central  // fluid cells with at least this many solid face neighbors become solid, 0 off  // boundary values grow linearly from zero over this time, 0 for no ramp  // per step peak diagnostics with their cell locations
 };

@@ -12,6 +12,11 @@ SEED_SEARCH_MM = 150.0  # searched downward from the head end
 SEED_PERSIST_LENGTH_MM = 15.0  # a real trachea continues as a tube for at least this length below the seed
 SEED_DRIFT_MM = 2.0  # allowed shift of the tube center between neighboring slices, plus half a slice for the tilt
 CENTRAL_FRACTION = (0.25, 0.75)  # the trachea sits in the middle of the field of view
+RECOVER_THRESHOLD_HU = -500.0  # streak artifacts can lift air inside the lumen well above the growth threshold
+RECOVER_MIN_GROWTH = 1.5  # below this the loose region is only the partial volume ring of a clean slice, nothing is missing
+RECOVER_MAX_GROWTH = 3.0  # a recovered region may be at most this many times the airway it grew from
+RECOVER_MAX_AREA_MM2 = 1500.0  # and never larger than a wide trachea, which keeps it out of the lungs
+RECOVER_MIN_AIRWAY_MM2 = 80.0  # only trachea and main bronchus sections, small bronchi sit in lung that is also below the loose threshold
 
 
 def body_interior_mask(volume):
@@ -100,4 +105,25 @@ def grow_airway(volume, spacing, start_threshold=AIR_THRESHOLD_HU):
         threshold += THRESHOLD_STEP_HU
     if previous_mask is None:
         raise RuntimeError("seed never fell inside the air mask")
-    return previous_mask, previous_threshold
+    return recover_streaked_air(smoothed, previous_mask, spacing), previous_threshold
+
+
+def recover_streaked_air(smoothed, mask, spacing):
+    """Per axial slice, widen the airway to each loose-threshold air region it touches, when that region stays airway sized."""
+    pixel_area = spacing[0]*spacing[1]
+    recovered = mask.copy()
+    for z in np.where(mask.any(axis=(0, 1)))[0]:
+        loose_labels, count = ndimage.label(smoothed[:, :, z] < RECOVER_THRESHOLD_HU)
+        if count == 0:
+            continue
+        airway = mask[:, :, z]
+        for region_label in np.unique(loose_labels[airway]):
+            if region_label == 0:
+                continue
+            region = loose_labels == region_label
+            region_area = region.sum()*pixel_area
+            airway_area = (region & airway).sum()*pixel_area  # every airway piece inside it, a streak can split the lumen
+            growth = region_area/max(airway_area, 1e-12)
+            if airway_area >= RECOVER_MIN_AIRWAY_MM2 and RECOVER_MIN_GROWTH <= growth <= RECOVER_MAX_GROWTH and region_area <= RECOVER_MAX_AREA_MM2:
+                recovered[:, :, z] |= region
+    return recovered

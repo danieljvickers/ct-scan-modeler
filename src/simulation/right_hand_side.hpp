@@ -10,6 +10,7 @@
 
 #include "ibm.hpp"
 #include "linear_solvers.hpp"
+#include "multigrid.hpp"
 
 // one Runge-Kutta stage: u* = u - dt*(gamma*N + zeta*N_previous) - alpha*dt*grad(p) + alpha*dt*nu*(L u* + L u)/2
 struct StageCoefficients {
@@ -83,14 +84,15 @@ private:
     HaloRule homogeneous_rules[num_field_kinds];
     HaloRule full_rules[num_field_kinds];  // boundary values at full strength, before any ramp
     real time = 0.0;
-    std::vector<std::unique_ptr<SpectralSolver>> helmholtz_preconditioners;  // [stage][component]
-    std::unique_ptr<SpectralSolver> poisson_preconditioner;
+    std::unique_ptr<MultigridHierarchy> multigrid;  // the preconditioners' grids when the grid is tiled
+    std::vector<std::unique_ptr<Preconditioner>> helmholtz_preconditioners;  // [stage][component]
+    std::unique_ptr<Preconditioner> poisson_preconditioner;
 
     DeviceArray<real> faces[max_dims];                  // face normal velocity, face i of a cell stored at that cell
     DeviceArray<real> predicted[max_dims];              // tentative velocity with halos
-    DeviceArray<real> convection[max_dims];             // owned compact
-    DeviceArray<real> previous_convection[max_dims];    // owned compact, for zeta
-    DeviceArray<real> boundary_offsets[max_dims];       // laplacian of the boundary values, owned compact
+    DeviceArray<real> convection[max_dims];             // owned vector
+    DeviceArray<real> previous_convection[max_dims];    // owned vector, for zeta
+    DeviceArray<real> boundary_offsets[max_dims];       // laplacian of the boundary values, owned vector
     DeviceArray<real> rhs, solution, pressure_correction, operator_input, correction_field, reduction;
     std::array<int, num_field_kinds> iterations = {0, 0, 0, 0};
 };

@@ -17,6 +17,8 @@ from . import extract, mesh, segment
 MIN_BRANCH_AREA_MM2 = 20.0      # an axial component this large counts as an airway branch when finding the carina
 CARINA_PERSIST_MM = 5.0         # two branches must persist this far below a slice for it to be the carina
 TRACHEA_END_MARGIN_MM = 10.0    # trimmed from both ends of the trachea so the larynx and carina do not skew the measures
+LOCAL_WINDOW_MM = 25.0          # a narrowing is measured against the median area within this distance above and below
+LOCAL_END_MM = 15.0             # and not within this distance of either end of the measured trachea
 
 
 def trachea_profile(mask, spacing):
@@ -63,9 +65,16 @@ def process(job):
             median = float(np.median(areas))
             narrowest = int(np.argmin(areas))
             row.update(trachea_length_mm=len(areas)*spacing[2] + 2*TRACHEA_END_MARGIN_MM, trachea_median_area_mm2=median,
-                       trachea_min_area_mm2=float(areas[narrowest]), narrowing_percent=100.0*(1.0 - areas[narrowest]/median),
-                       narrowest_mm_above_carina=(heights[narrowest] - carina)*spacing[2],
-                       area_variation_percent=100.0*float(np.std(areas)/np.mean(areas)))
+                       trachea_min_area_mm2=float(areas[narrowest]), area_variation_percent=100.0*float(np.std(areas)/np.mean(areas)))
+            # local narrowing: each height against the median of its neighbors, away from the trimmed ends where the airway tapers
+            height_mm = (heights - carina)*spacing[2]
+            inner = (height_mm > height_mm.min() + LOCAL_END_MM) & (height_mm < height_mm.max() - LOCAL_END_MM)
+            ratios = np.full(len(areas), np.inf)
+            for i in np.where(inner)[0]:
+                ratios[i] = areas[i]/np.median(areas[np.abs(height_mm - height_mm[i]) <= LOCAL_WINDOW_MM])
+            if np.isfinite(ratios).any():
+                i = int(np.argmin(ratios))
+                row.update(local_narrowing_percent=100.0*(1.0 - ratios[i]), local_narrowing_mm_above_carina=float(height_mm[i]))
         np.savez(os.path.join(output_dir, f"patient_{int(patient):02d}_profile.npz"), heights_mm=(heights - carina)*spacing[2], areas_mm2=areas)
 
         vertices, faces = mesh.mask_to_surface(mask, spacing, 1.0)
@@ -93,8 +102,8 @@ def main():
     with Pool(args.workers) as pool:
         rows = pool.map(process, [(p, args.data_dir, args.output_dir) for p in patients])
     columns = ["patient", "status", "stl", "triangles", "extent_mm", "voxel_mm", "threshold_hu", "airway_volume_ml", "label_volume_ml",
-               "dice_vs_labels", "trachea_length_mm", "trachea_median_area_mm2", "trachea_min_area_mm2", "narrowing_percent",
-               "narrowest_mm_above_carina", "area_variation_percent"]
+               "dice_vs_labels", "trachea_length_mm", "trachea_median_area_mm2", "trachea_min_area_mm2", "local_narrowing_percent",
+               "local_narrowing_mm_above_carina", "area_variation_percent"]
     with open(os.path.join(args.output_dir, "airway_bank.csv"), "w", newline="") as table:
         writer = csv.DictWriter(table, fieldnames=columns)
         writer.writeheader()

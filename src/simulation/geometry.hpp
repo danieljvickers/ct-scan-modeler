@@ -25,13 +25,17 @@ public:
 
     int num_patches = 0;
     DeviceArray<int> markers;              // storage sized, 0 in fluid and the patch id inside a body
-    DeviceArray<signed char> cell_types;   // owned compact, CellType
+    DeviceArray<signed char> cell_types;   // owned vector, CellType
     GhostPoints ghost_points;
     long global_ghost_points = 0;
     long global_bilinear = 0;              // ghost points whose stencil was all fluid
     long global_fallback = 0;              // ghost points whose stencil was all solid, interpolated from their own fluid neighbors
     long global_trapped = 0;               // sealed fluid cells turned solid
     long global_thin = 0;                  // fluid cells in one cell thick slots and pockets turned solid
+
+    // tiles of a tiled grid shape within reach cells of the fluid, then every array moved from dense to tiled storage
+    std::vector<char> activeTiles(const GridView& dense, const GridView& tiled_shape, int reach) const;
+    void convertToTiles(const GridView& dense, const GridView& tiled, bool has_bodies);
 
 private:
     void fillTrappedFluid(const GridView& grid);

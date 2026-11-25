@@ -11,6 +11,12 @@ public:
 
     bool isActive() const { return this->is_active; }
 
+    // move the geometry from the dense grid it was built on to a tiled grid of the same box
+    void convertToTiles(const GridView& tiled) {
+        this->geometry.convertToTiles(this->grid, tiled, this->is_active);
+        this->grid = tiled;
+    }
+
     // mirror the image point velocity into each ghost cell and zero the body interior, for a stationary no-slip wall
     void applyGhostVelocity(real* velocity) const;
 

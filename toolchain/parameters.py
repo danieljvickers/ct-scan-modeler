@@ -53,6 +53,14 @@ SCALARS = {
     # output
     "prim_vars_wrt": Parameter(LOGICAL, True, "write primitive variables at each save"),
     "ib_force_wrt": Parameter(LOGICAL, False, "write immersed boundary forces every step"),
+    "bc_ramp_time": Parameter(REAL, 0.0, "time over which boundary pressures and inflow velocities grow linearly from zero, 0 applies them at once"),
+    "ib_fill_faces": Parameter(INTEGER, 0, "fluid cells with at least this many solid face neighbors become solid, 0 keeps them all"),
+    "ib_wall_upwind": Parameter(REAL, 0.0, "upwind fraction of convection on faces next to the immersed wall, 0 central, 1 first order upwind"),
+    "ib_block_faces": Parameter(LOGICAL, False, "zero normal velocity on faces between fluid and solid cells, with zero flux pressure faces to match"),
+    "weno_order": Parameter(INTEGER, 0, "convection face values, 0 central, 3 WENO3 (Jiang and Shu 1996)"),
+    "weno_wall_only": Parameter(LOGICAL, True, "use WENO only on faces next to the immersed wall, central elsewhere"),
+    "tiled_grid": Parameter(LOGICAL, False, "store only 8^3 tiles (16^2 in 2D) near the fluid and precondition with multigrid, on one GPU"),
+    "diag_wrt": Parameter(LOGICAL, False, "write the location of the peak speed, CFL number, divergence, and pressure every step to D/diagnostics.dat"),
 }
 
 for direction in "xyz":

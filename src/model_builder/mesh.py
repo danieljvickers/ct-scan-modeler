@@ -71,3 +71,14 @@ def write_binary_stl(path, vertices, faces):
         stl_file.write(b"model_builder".ljust(80, b"\0"))
         stl_file.write(np.uint32(len(faces)).tobytes())
         stl_file.write(triangles.tobytes())
+
+
+def read_binary_stl(path):
+    """Vertices and faces of a binary STL, with corners shared between triangles merged into one vertex."""
+    record = np.dtype([("normal", "<f4", 3), ("corners", "<f4", (3, 3)), ("attribute", "<u2")])
+    with open(path, "rb") as stl_file:
+        stl_file.seek(80)
+        count = int(np.frombuffer(stl_file.read(4), dtype=np.uint32)[0])
+        triangles = np.frombuffer(stl_file.read(count*record.itemsize), dtype=record)
+    vertices, faces = np.unique(triangles["corners"].reshape(-1, 3), axis=0, return_inverse=True)
+    return vertices.astype(np.float64), faces.reshape(-1, 3)

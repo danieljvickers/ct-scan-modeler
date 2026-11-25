@@ -27,6 +27,7 @@ add_executable(simulation
     src/simulation/geometry.cu
     src/simulation/ibm.cu
     src/simulation/linear_solvers.cu
+    src/simulation/multigrid.cu
     src/simulation/right_hand_side.cu
     src/simulation/out.cu
 )

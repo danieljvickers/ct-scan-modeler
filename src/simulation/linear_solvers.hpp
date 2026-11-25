@@ -33,11 +33,18 @@ private:
     DeviceArray<real> real_work;
 };
 
+// approximate inverse applied to owned vectors, the right preconditioner of GMRES
+class Preconditioner {
+public:
+    virtual ~Preconditioner() = default;
+    virtual void solve(const real* rhs, real* solution) = 0;
+};
+
 // exact solve of (shift + scale*laplacian) x = b on the uniform grid with domain halos only, the no-body operator
-class SpectralSolver {
+class SpectralSolver : public Preconditioner {
 public:
     SpectralSolver(const GridView& grid, SlabTranspose& transpose, LineTransforms& transforms, const HaloRule& rule, real shift, real scale);
-    void solve(const real* rhs, real* solution);
+    void solve(const real* rhs, real* solution) override;
 
 private:
     void transformAxis(real* data, int length, long outer, long inner, int axis, bool inverse);

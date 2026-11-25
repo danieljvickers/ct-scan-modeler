@@ -53,6 +53,35 @@ __global__ void wrapSidesKernel(GridView grid, real* field, int direction) {
     field[grid.storageIndex(index[0], index[1], index[2])] = field[grid.storageIndex(source[0], source[1], source[2])];
 }
 
+// tiled storage: every stored halo cell on one side of an axis, over the whole stored extent of the other axes, takes its mirror
+// or, on a periodic axis, the cell one period away
+__global__ void fillTiledSideKernel(GridView grid, real* field, int direction, int side, real coefficient, real value, const int* solid_markers,
+                                    bool wrap) {
+    const long cell = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    int index[max_dims];
+    if (cell >= grid.numStorageThreads() || !grid.storageCell(cell, index[0], index[1], index[2])) return;
+    const int cells = grid.cells[direction];
+    if (side == 0 ? index[direction] >= 0 : index[direction] < cells) return;
+    int source[max_dims] = {index[0], index[1], index[2]};
+    if (wrap) {
+        source[direction] += side == 0 ? cells : -cells;
+        field[cell] = field[grid.storageIndex(source[0], source[1], source[2])];
+        return;
+    }
+    source[direction] = side == 0 ? -1 - index[direction] : 2*cells - 1 - index[direction];  // mirror across the boundary face
+    const long interior_cell = grid.storageIndex(source[0], source[1], source[2]);
+    const real applied_value = solid_markers != nullptr && solid_markers[interior_cell] != 0 ? 0.0 : value;
+    field[cell] = coefficient*field[interior_cell] + applied_value;
+}
+
+void fillTiledHalos(const GridView& grid, const HaloRule& rule, real* field) {
+    for (int d = 0; d < numDims(grid); ++d)
+        for (int side = 0; side < 2; ++side)
+            fillTiledSideKernel<<<numBlocks(grid.numStorageThreads()), block_size>>>(grid, field, d, side, rule.coefficient[d][side],
+                                                                                    rule.value[d][side], rule.solid_markers, grid.periodic[d]);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 void fillPhysicalSides(const GridView& grid, const HaloRule& rule, real* field, int direction) {
     const int other_1 = (direction + 1) % max_dims, other_2 = (direction + 2) % max_dims;
     const long num_threads = static_cast<long>(grid.storage[other_1])*grid.storage[other_2]*grid.halo[direction];
@@ -100,6 +129,10 @@ HaloRule makeHaloRule(const Parameters& parameters, FieldKind kind) {
 }
 
 void fillHalos(const GridView& grid, const HaloRule& rule, HaloExchange& exchange, real* field) {
+    if (grid.tiled) {
+        fillTiledHalos(grid, rule, field);  // one rank holds the whole domain
+        return;
+    }
     const int axis = grid.decomposed_axis;
     for (int d = 0; d < numDims(grid); ++d)
         if (d != axis) fillPhysicalSides(grid, rule, field, d);

@@ -16,11 +16,9 @@ struct InitialPatches {
 // later patches overwrite earlier ones, as in MFC
 __global__ void initialConditionKernel(GridView grid, InitialPatches initial, real* velocity_x, real* velocity_y, real* velocity_z,
                                        real* pressure) {
-    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
-    if (owned >= grid.numOwned()) return;
     int index[max_dims];
-    grid.ownedCell(owned, index[0], index[1], index[2]);
-    const long cell = grid.storageIndex(index[0], index[1], index[2]);
+    long entry, cell;
+    if (!grid.ownedThread(blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x, index[0], index[1], index[2], entry, cell)) return;
     real* velocity[max_dims] = {velocity_x, velocity_y, velocity_z};
     for (int p = 0; p < initial.count; ++p) {
         const InitialPatch& patch = initial.patches[p];
@@ -45,70 +43,80 @@ __global__ void initialConditionKernel(GridView grid, InitialPatches initial, re
 }
 
 __global__ void scatterOwnedKernel(GridView grid, const real* compact, real* storage) {
-    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
-    if (owned >= grid.numOwned()) return;
     int i, j, k;
-    grid.ownedCell(owned, i, j, k);
-    storage[grid.storageIndex(i, j, k)] = compact[owned];
+    long entry, cell;
+    if (!grid.ownedThread(blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x, i, j, k, entry, cell)) return;
+    storage[cell] = compact[entry];
 }
 
 __global__ void gatherOwnedKernel(GridView grid, const real* storage, real* compact) {
-    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
-    if (owned >= grid.numOwned()) return;
     int i, j, k;
-    grid.ownedCell(owned, i, j, k);
-    compact[owned] = storage[grid.storageIndex(i, j, k)];
+    long entry, cell;
+    if (!grid.ownedThread(blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x, i, j, k, entry, cell)) return;
+    compact[entry] = storage[cell];
 }
 
-__device__ inline real laplacian(const GridView& grid, const real* field, long cell) {
-    real value = 0.0;
-    for (int d = 0; d < numDims(grid); ++d) {
-        const long step = grid.stride(d);
-        value += (field[cell - step] - 2.0*field[cell] + field[cell + step])/(grid.spacing[d]*grid.spacing[d]);
+// a cell and its local index, for neighbor lookups that work in dense and tiled storage
+struct Site {
+    long cell;
+    int index[max_dims];
+    __device__ long along(const GridView& grid, int direction, int steps) const {
+        return grid.shifted(this->cell, this->index[0], this->index[1], this->index[2], direction, steps);
     }
+    __device__ Site moved(const GridView& grid, int direction, int steps) const {
+        Site site = *this;
+        site.cell = this->along(grid, direction, steps);
+        site.index[direction] += steps;
+        return site;
+    }
+};
+
+__device__ inline bool ownedSite(const GridView& grid, Site& site, long& entry) {
+    return grid.ownedThread(blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x, site.index[0], site.index[1], site.index[2], entry, site.cell);
+}
+
+__device__ inline real laplacian(const GridView& grid, const real* field, const Site& site) {
+    real value = 0.0;
+    for (int d = 0; d < numDims(grid); ++d)
+        value += (field[site.along(grid, d, -1)] - 2.0*field[site.cell] + field[site.along(grid, d, 1)])/(grid.spacing[d]*grid.spacing[d]);
     return value;
 }
 
-__device__ inline real centralGradient(const GridView& grid, const real* field, long cell, int direction) {
-    const long step = grid.stride(direction);
-    return (field[cell + step] - field[cell - step])/(2.0*grid.spacing[direction]);
+__device__ inline real centralGradient(const GridView& grid, const real* field, const Site& site, int direction) {
+    return (field[site.along(grid, direction, 1)] - field[site.along(grid, direction, -1)])/(2.0*grid.spacing[direction]);
 }
 
 // y = shift*x + scale*laplacian(x) on owned cells, x has its halos filled
 __global__ void helmholtzKernel(GridView grid, const real* x_storage, real shift, real scale, real* y_owned) {
-    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
-    if (owned >= grid.numOwned()) return;
-    int i, j, k;
-    grid.ownedCell(owned, i, j, k);
-    const long cell = grid.storageIndex(i, j, k);
-    y_owned[owned] = shift*x_storage[cell] + scale*laplacian(grid, x_storage, cell);
+    Site site;
+    long entry;
+    if (!ownedSite(grid, site, entry)) return;
+    y_owned[entry] = shift*x_storage[site.cell] + scale*laplacian(grid, x_storage, site);
 }
 
 // with blocked faces a fluid cell exchanges no pressure flux with its solid neighbors, the discrete match of zero normal face velocity
 __global__ void blockedLaplacianKernel(GridView grid, const real* x_storage, const int* markers, real shift, real scale, real* y_owned) {
-    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
-    if (owned >= grid.numOwned()) return;
-    int i, j, k;
-    grid.ownedCell(owned, i, j, k);
-    const long cell = grid.storageIndex(i, j, k);
-    if (markers[cell] != 0) {
-        y_owned[owned] = shift*x_storage[cell] + scale*laplacian(grid, x_storage, cell);  // solid rows, ghost rows are overwritten later
+    Site site;
+    long entry;
+    if (!ownedSite(grid, site, entry)) return;
+    if (markers[site.cell] != 0) {
+        y_owned[entry] = shift*x_storage[site.cell] + scale*laplacian(grid, x_storage, site);  // solid rows, ghost rows are overwritten later
         return;
     }
     real value = 0.0;
     for (int d = 0; d < numDims(grid); ++d)
         for (int side = -1; side <= 1; side += 2) {
-            const long neighbor = cell + side*grid.stride(d);
-            if (markers[neighbor] == 0) value += (x_storage[neighbor] - x_storage[cell])/(grid.spacing[d]*grid.spacing[d]);
+            const long neighbor = site.along(grid, d, side);
+            if (markers[neighbor] == 0) value += (x_storage[neighbor] - x_storage[site.cell])/(grid.spacing[d]*grid.spacing[d]);
         }
-    y_owned[owned] = shift*x_storage[cell] + scale*value;
+    y_owned[entry] = shift*x_storage[site.cell] + scale*value;
 }
 
 // a cell is next to the wall if it or any face neighbor is solid
-__device__ inline bool nearWall(const GridView& grid, const int* markers, long cell) {
-    if (markers[cell] != 0) return true;
+__device__ inline bool nearWall(const GridView& grid, const int* markers, const Site& site) {
+    if (markers[site.cell] != 0) return true;
     for (int d = 0; d < numDims(grid); ++d)
-        if (markers[cell - grid.stride(d)] != 0 || markers[cell + grid.stride(d)] != 0) return true;
+        if (markers[site.along(grid, d, -1)] != 0 || markers[site.along(grid, d, 1)] != 0) return true;
     return false;
 }
 
@@ -130,41 +138,38 @@ struct ConvectionScheme {
     bool weno_wall_only;
 };
 
-// flux through the face between lower and upper: central by default, WENO3 or a blend toward upwind where asked
-__device__ inline real faceFlux(const GridView& grid, const ConvectionScheme& scheme, real face_velocity, long lower, long upper,
-                                const real* field) {
-    const real central = 0.5*(field[lower] + field[upper]);
+// flux through the face between lower and upper along a direction: central by default, WENO3 or a blend toward upwind where asked
+__device__ inline real faceFlux(const GridView& grid, const ConvectionScheme& scheme, real face_velocity, const Site& lower, const Site& upper,
+                                int direction, const real* field) {
+    const real central = 0.5*(field[lower.cell] + field[upper.cell]);
     const int* markers = scheme.markers;
     const bool near_wall = markers != nullptr && (nearWall(grid, markers, lower) || nearWall(grid, markers, upper));
     if (scheme.weno_order == 3 && (!scheme.weno_wall_only || near_wall)) {
-        const long step = upper - lower;
-        const real value = face_velocity >= 0.0 ? weno3(field[lower - step], field[lower], field[upper])
-                                                : weno3(field[upper + step], field[upper], field[lower]);
+        const real value = face_velocity >= 0.0 ? weno3(field[lower.along(grid, direction, -1)], field[lower.cell], field[upper.cell])
+                                                : weno3(field[upper.along(grid, direction, 1)], field[upper.cell], field[lower.cell]);
         return face_velocity*value;
     }
     const real wall_upwind = scheme.wall_upwind;
     if (wall_upwind <= 0.0 || !near_wall) return face_velocity*central;
-    const real upwind = face_velocity >= 0.0 ? field[lower] : field[upper];
+    const real upwind = face_velocity >= 0.0 ? field[lower.cell] : field[upper.cell];
     return face_velocity*((1.0 - wall_upwind)*central + wall_upwind*upwind);
 }
 
 // conservative convection div(U q) with divergence free face velocities; both cells of a face compute the same flux
 __global__ void convectionKernel(GridView grid, const real* field, const real* faces_x, const real* faces_y, const real* faces_z,
                                  ConvectionScheme scheme, real* convection) {
-    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
-    if (owned >= grid.numOwned()) return;
-    int i, j, k;
-    grid.ownedCell(owned, i, j, k);
-    const long cell = grid.storageIndex(i, j, k);
+    Site site;
+    long entry;
+    if (!ownedSite(grid, site, entry)) return;
     const real* faces[max_dims] = {faces_x, faces_y, faces_z};
     real value = 0.0;
     for (int d = 0; d < numDims(grid); ++d) {
-        const long step = grid.stride(d);
-        const real upper_flux = faceFlux(grid, scheme, faces[d][cell + step], cell, cell + step, field);
-        const real lower_flux = faceFlux(grid, scheme, faces[d][cell], cell - step, cell, field);
+        const Site below = site.moved(grid, d, -1), above = site.moved(grid, d, 1);
+        const real upper_flux = faceFlux(grid, scheme, faces[d][above.cell], site, above, d, field);
+        const real lower_flux = faceFlux(grid, scheme, faces[d][site.cell], below, site, d, field);
         value += (upper_flux - lower_flux)/grid.spacing[d];
     }
-    convection[owned] = value;
+    convection[entry] = value;
 }
 
 struct PredictorTerms {
@@ -175,34 +180,43 @@ struct PredictorTerms {
 __global__ void predictorRhsKernel(GridView grid, PredictorTerms terms, int component, const real* field, const real* convection,
                                    const real* previous_convection, const real* pressure, const real* boundary_offset,
                                    const signed char* cell_types, real* rhs) {
-    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
-    if (owned >= grid.numOwned()) return;
-    if (cell_types[owned] != cell_fluid) {
-        rhs[owned] = 0.0;  // stationary no-slip wall
+    Site site;
+    long entry;
+    if (!ownedSite(grid, site, entry)) return;
+    if (cell_types[entry] != cell_fluid) {
+        rhs[entry] = 0.0;  // stationary no-slip wall
         return;
     }
-    int i, j, k;
-    grid.ownedCell(owned, i, j, k);
-    const long cell = grid.storageIndex(i, j, k);
     const real stage_dt = terms.alpha*terms.dt;
-    const real explicit_convection = terms.gamma*convection[owned] + (terms.zeta != 0.0 ? terms.zeta*previous_convection[owned] : 0.0);
-    rhs[owned] = field[cell] - terms.dt*explicit_convection - stage_dt*centralGradient(grid, pressure, cell, component)
-                 + 0.5*stage_dt*terms.kinematic_viscosity*laplacian(grid, field, cell)
-                 + stage_dt*terms.kinematic_viscosity*boundary_offset[owned];
+    const real explicit_convection = terms.gamma*convection[entry] + (terms.zeta != 0.0 ? terms.zeta*previous_convection[entry] : 0.0);
+    rhs[entry] = field[site.cell] - terms.dt*explicit_convection - stage_dt*centralGradient(grid, pressure, site, component)
+                 + 0.5*stage_dt*terms.kinematic_viscosity*laplacian(grid, field, site)
+                 + stage_dt*terms.kinematic_viscosity*boundary_offset[entry];
 }
 
-// face index f along a direction for owned cells in the other directions, faces 0..cells inclusive
-__device__ inline bool faceCell(const GridView& grid, int direction, long thread, int index[max_dims]) {
+// the cell just above face f along a direction, for owned cells in the other directions and faces 0..cells inclusive
+__device__ inline bool faceSite(const GridView& grid, int direction, Site& upper) {
+    const long thread = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    int* index = upper.index;
+    if (grid.tiled) {
+        if (thread >= grid.numStorageThreads() || !grid.storageCell(thread, index[0], index[1], index[2])) return false;
+        for (int d = 0; d < max_dims; ++d)
+            if (index[d] < 0 || index[d] >= grid.cells[d] + (d == direction ? 1 : 0)) return false;
+        upper.cell = thread;
+        return true;
+    }
     int extent[max_dims] = {grid.cells[0], grid.cells[1], grid.cells[2]};
     extent[direction] += 1;
     if (thread >= static_cast<long>(extent[0])*extent[1]*extent[2]) return false;
     index[0] = static_cast<int>(thread % extent[0]);
     index[1] = static_cast<int>((thread/extent[0]) % extent[1]);
     index[2] = static_cast<int>(thread/(static_cast<long>(extent[0])*extent[1]));
+    upper.cell = grid.storageIndex(index[0], index[1], index[2]);
     return true;
 }
 
 inline long numFaceThreads(const GridView& grid, int direction) {
+    if (grid.tiled) return grid.numStorageThreads();
     long count = 1;
     for (int d = 0; d < max_dims; ++d) count *= grid.cells[d] + (d == direction ? 1 : 0);
     return count;
@@ -214,85 +228,84 @@ __device__ inline bool isBlockedFace(const int* block_markers, long lower, long 
 }
 
 __global__ void interpolateFacesKernel(GridView grid, int direction, const real* field, const int* block_markers, real* faces) {
-    int index[max_dims];
-    if (!faceCell(grid, direction, blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x, index)) return;
-    const long upper = grid.storageIndex(index[0], index[1], index[2]);
-    const long lower = upper - grid.stride(direction);
-    faces[upper] = isBlockedFace(block_markers, lower, upper) ? 0.0 : 0.5*(field[lower] + field[upper]);
+    Site upper;
+    if (!faceSite(grid, direction, upper)) return;
+    const long lower = upper.along(grid, direction, -1);
+    faces[upper.cell] = isBlockedFace(block_markers, lower, upper.cell) ? 0.0 : 0.5*(field[lower] + field[upper.cell]);
 }
 
 // interpolated tentative velocity with the cell pressure gradient swapped for the compact face gradient on interior fluid faces
 __global__ void predictedFacesKernel(GridView grid, int direction, const real* predicted, const real* pressure, const int* markers,
                                      const int* block_markers, real stage_dt, real* faces) {
-    int index[max_dims];
-    if (!faceCell(grid, direction, blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x, index)) return;
-    const long step = grid.stride(direction);
-    const long upper = grid.storageIndex(index[0], index[1], index[2]);
-    const long lower = upper - step;
-    if (isBlockedFace(block_markers, lower, upper)) {
-        faces[upper] = 0.0;
+    Site upper;
+    if (!faceSite(grid, direction, upper)) return;
+    const Site lower = upper.moved(grid, direction, -1);
+    if (isBlockedFace(block_markers, lower.cell, upper.cell)) {
+        faces[upper.cell] = 0.0;
         return;
     }
-    real value = 0.5*(predicted[lower] + predicted[upper]);
-    const int global_face = grid.offset[direction] + index[direction];
+    real value = 0.5*(predicted[lower.cell] + predicted[upper.cell]);
+    const int global_face = grid.offset[direction] + upper.index[direction];
     const bool is_interior = grid.periodic[direction] || (global_face > 0 && global_face < grid.global_cells[direction]);
-    const bool is_interior_fluid = is_interior && markers[lower] == 0 && markers[upper] == 0;
+    const bool is_interior_fluid = is_interior && markers[lower.cell] == 0 && markers[upper.cell] == 0;
     if (is_interior_fluid) {
         const real cell_gradient = 0.5*(centralGradient(grid, pressure, lower, direction) + centralGradient(grid, pressure, upper, direction));
-        value += stage_dt*(cell_gradient - (pressure[upper] - pressure[lower])/grid.spacing[direction]);
+        value += stage_dt*(cell_gradient - (pressure[upper.cell] - pressure[lower.cell])/grid.spacing[direction]);
     }
-    faces[upper] = value;
+    faces[upper.cell] = value;
 }
 
 __global__ void divergenceKernel(GridView grid, const real* faces_x, const real* faces_y, const real* faces_z, const signed char* cell_types,
                                  real scale, bool fluid_only, real* divergence) {
-    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
-    if (owned >= grid.numOwned()) return;
-    if (fluid_only && cell_types[owned] != cell_fluid) {
-        divergence[owned] = 0.0;
+    Site site;
+    long entry;
+    if (!ownedSite(grid, site, entry)) return;
+    if (fluid_only && cell_types[entry] != cell_fluid) {
+        divergence[entry] = 0.0;
         return;
     }
-    int i, j, k;
-    grid.ownedCell(owned, i, j, k);
-    const long cell = grid.storageIndex(i, j, k);
     const real* faces[max_dims] = {faces_x, faces_y, faces_z};
     real value = 0.0;
-    for (int d = 0; d < numDims(grid); ++d) value += (faces[d][cell + grid.stride(d)] - faces[d][cell])/grid.spacing[d];
-    divergence[owned] = scale*value;
+    for (int d = 0; d < numDims(grid); ++d) value += (faces[d][site.along(grid, d, 1)] - faces[d][site.cell])/grid.spacing[d];
+    divergence[entry] = scale*value;
 }
 
 __global__ void correctFacesKernel(GridView grid, int direction, const real* correction, const int* block_markers, real stage_dt, real* faces) {
-    int index[max_dims];
-    if (!faceCell(grid, direction, blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x, index)) return;
-    const long upper = grid.storageIndex(index[0], index[1], index[2]);
-    const long lower = upper - grid.stride(direction);
-    if (isBlockedFace(block_markers, lower, upper)) return;
-    faces[upper] -= stage_dt*(correction[upper] - correction[lower])/grid.spacing[direction];
+    Site upper;
+    if (!faceSite(grid, direction, upper)) return;
+    const long lower = upper.along(grid, direction, -1);
+    if (isBlockedFace(block_markers, lower, upper.cell)) return;
+    faces[upper.cell] -= stage_dt*(correction[upper.cell] - correction[lower])/grid.spacing[direction];
 }
 
 __global__ void correctVelocityKernel(GridView grid, int component, const real* predicted, const real* correction, real stage_dt,
                                       real* velocity) {
-    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
-    if (owned >= grid.numOwned()) return;
-    int i, j, k;
-    grid.ownedCell(owned, i, j, k);
-    const long cell = grid.storageIndex(i, j, k);
-    velocity[cell] = predicted[cell] - stage_dt*centralGradient(grid, correction, cell, component);
+    Site site;
+    long entry;
+    if (!ownedSite(grid, site, entry)) return;
+    velocity[site.cell] = predicted[site.cell] - stage_dt*centralGradient(grid, correction, site, component);
 }
 
 __global__ void addOwnedKernel(GridView grid, const real* compact, real* storage) {
-    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
-    if (owned >= grid.numOwned()) return;
     int i, j, k;
-    grid.ownedCell(owned, i, j, k);
-    storage[grid.storageIndex(i, j, k)] += compact[owned];
+    long entry, cell;
+    if (!grid.ownedThread(blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x, i, j, k, entry, cell)) return;
+    storage[cell] += compact[entry];
 }
 
-// largest |value| over the owned cells selected by cell_types, a NaN wins because its bits exceed every finite double
+// on a tiled grid the solid interior rows become the identity, their values never reach the fluid and stay zero
+__global__ void interiorIdentityKernel(GridView grid, const signed char* cell_types, const real* x, real* y) {
+    int i, j, k;
+    long entry, cell;
+    if (!grid.ownedThread(blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x, i, j, k, entry, cell) || cell_types[entry] != cell_interior) return;
+    y[entry] = x[entry];
+}
+
+// largest |value| over the owned vector entries selected by cell_types, a NaN wins because its bits exceed every finite double
 __global__ void maxAbsoluteKernel(long count, const real* values, const signed char* cell_types, unsigned long long* maximum) {
-    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
-    if (owned >= count || (cell_types != nullptr && cell_types[owned] != cell_fluid)) return;
-    atomicMax(maximum, static_cast<unsigned long long>(__double_as_longlong(fabs(values[owned]))));
+    const long entry = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (entry >= count || (cell_types != nullptr && cell_types[entry] != cell_fluid)) return;
+    atomicMax(maximum, static_cast<unsigned long long>(__double_as_longlong(fabs(values[entry]))));
 }
 
 real maxAbsolute(long count, const real* values, const signed char* cell_types, DeviceArray<real>& reduction) {
@@ -309,26 +322,24 @@ enum DiagnosticQuantity : int { quantity_speed = 0, quantity_cfl = 1, quantity_p
 // one diagnostic value per owned cell, the CFL number is the sum over directions of |u_d| dt / dx_d
 __global__ void diagnosticValuesKernel(GridView grid, int quantity, real dt, const real* u, const real* v, const real* w, const real* pressure,
                                        real* compact) {
-    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
-    if (owned >= grid.numOwned()) return;
     int i, j, k;
-    grid.ownedCell(owned, i, j, k);
-    const long cell = grid.storageIndex(i, j, k);
+    long entry, cell;
+    if (!grid.ownedThread(blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x, i, j, k, entry, cell)) return;
     const real speeds[max_dims] = {u[cell], grid.num_dims > 1 ? v[cell] : 0.0, grid.num_dims > 2 ? w[cell] : 0.0};
     if (quantity == quantity_speed) {
-        compact[owned] = sqrt(speeds[0]*speeds[0] + speeds[1]*speeds[1] + speeds[2]*speeds[2]);
+        compact[entry] = sqrt(speeds[0]*speeds[0] + speeds[1]*speeds[1] + speeds[2]*speeds[2]);
     } else if (quantity == quantity_cfl) {
-        compact[owned] = dt*(fabs(speeds[0])/grid.spacing[0] + fabs(speeds[1])/grid.spacing[1] + fabs(speeds[2])/grid.spacing[2]);
+        compact[entry] = dt*(fabs(speeds[0])/grid.spacing[0] + fabs(speeds[1])/grid.spacing[1] + fabs(speeds[2])/grid.spacing[2]);
     } else {
-        compact[owned] = pressure[cell];
+        compact[entry] = pressure[cell];
     }
 }
 
-// lowest owned index whose |value| equals the target
+// lowest owned vector entry whose |value| equals the target
 __global__ void findFirstKernel(long count, const real* values, real target, const signed char* cell_types, unsigned long long* first) {
-    const long owned = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
-    if (owned >= count || (cell_types != nullptr && cell_types[owned] != cell_fluid)) return;
-    if (fabs(values[owned]) == target) atomicMin(first, static_cast<unsigned long long>(owned));
+    const long entry = blockIdx.x*static_cast<long>(blockDim.x) + threadIdx.x;
+    if (entry >= count || (cell_types != nullptr && cell_types[entry] != cell_fluid)) return;
+    if (fabs(values[entry]) == target) atomicMin(first, static_cast<unsigned long long>(entry));
 }
 
 }  // namespace
@@ -342,8 +353,8 @@ std::vector<StageCoefficients> rungeKuttaStages(int rk_order) {
 FlowSolver::FlowSolver(const Parameters& parameters, const GridView& grid, ImmersedBoundaries& immersed_boundaries)
     : parameters(parameters), grid(grid), immersed_boundaries(immersed_boundaries),
       stages(rungeKuttaStages(parameters.rk_order)), num_dims(grid.num_dims), exchange(grid), transpose(grid),
-      gmres(grid.numOwned(), parameters.krylov_restart, parameters.krylov_tolerance, parameters.krylov_max_iterations) {
-    const long num_storage = grid.numStorage(), num_owned = grid.numOwned();
+      gmres(grid.numOwnedVector(), parameters.krylov_restart, parameters.krylov_tolerance, parameters.krylov_max_iterations) {
+    const long num_storage = grid.numStorage(), num_owned = grid.numOwnedVector();
     for (int d = 0; d < max_dims; ++d) {
         this->velocity[d].resize(num_storage);
         this->faces[d].resize(num_storage);
@@ -367,15 +378,21 @@ FlowSolver::FlowSolver(const Parameters& parameters, const GridView& grid, Immer
         this->full_rules[kind] = this->rules[kind];
     }
 
-    // one Helmholtz preconditioner per stage and component, one Poisson preconditioner
+    // one Helmholtz preconditioner per stage and component, one Poisson preconditioner: spectral on a dense grid, multigrid on a tiled one
+    const Geometry& geometry = immersed_boundaries.geometry;
+    if (grid.tiled) this->multigrid = std::make_unique<MultigridHierarchy>(grid, geometry.cell_types.data());
+    auto make_preconditioner = [&](FieldKind kind, real shift, real scale, real ghost_sign) -> std::unique_ptr<Preconditioner> {
+        if (grid.tiled)
+            return std::make_unique<MultigridSolver>(*this->multigrid, geometry.ghost_points, geometry.cell_types.data(), this->homogeneous_rules[kind],
+                                                     shift, scale, ghost_sign);
+        return std::make_unique<SpectralSolver>(grid, this->transpose, this->transforms, this->homogeneous_rules[kind], shift, scale);
+    };
     for (const StageCoefficients& coefficients : this->stages)
         for (int component = 0; component < this->num_dims; ++component) {
             const real diffusion_number = 0.5*coefficients.alpha*parameters.dt*parameters.kinematic_viscosity;
-            this->helmholtz_preconditioners.push_back(std::make_unique<SpectralSolver>(
-                grid, this->transpose, this->transforms, this->homogeneous_rules[component], 1.0, -diffusion_number));
+            this->helmholtz_preconditioners.push_back(make_preconditioner(static_cast<FieldKind>(component), 1.0, -diffusion_number, 1.0));
         }
-    this->poisson_preconditioner = std::make_unique<SpectralSolver>(grid, this->transpose, this->transforms,
-                                                                    this->homogeneous_rules[field_pressure], 0.0, 1.0);
+    this->poisson_preconditioner = make_preconditioner(field_pressure, 0.0, 1.0, -1.0);
 
     this->computeBoundaryOffsets();
 }
@@ -385,7 +402,7 @@ void FlowSolver::computeBoundaryOffsets() {
     for (int component = 0; component < this->num_dims; ++component) {
         this->operator_input.fillZero();
         fillHalos(this->grid, this->rules[component], this->exchange, this->operator_input.data());
-        helmholtzKernel<<<numBlocks(this->grid.numOwned()), block_size>>>(this->grid, this->operator_input.data(), 0.0, 1.0,
+        helmholtzKernel<<<numBlocks(this->grid.numOwnedThreads()), block_size>>>(this->grid, this->operator_input.data(), 0.0, 1.0,
                                                                            this->boundary_offsets[component].data());
     }
     CUDA_CHECK(cudaGetLastError());
@@ -407,14 +424,16 @@ void FlowSolver::fillVelocityHalos(DeviceArray<real>* fields) {
 
 void FlowSolver::applyOperator(const real* x, real* y, FieldKind kind, real shift, real scale, real ghost_sign) {
     const GridView& g = this->grid;
-    scatterOwnedKernel<<<numBlocks(g.numOwned()), block_size>>>(g, x, this->operator_input.data());
+    scatterOwnedKernel<<<numBlocks(g.numOwnedThreads()), block_size>>>(g, x, this->operator_input.data());
     fillHalos(g, this->homogeneous_rules[kind], this->exchange, this->operator_input.data());
     if (kind == field_pressure && this->blockMarkers() != nullptr)
-        blockedLaplacianKernel<<<numBlocks(g.numOwned()), block_size>>>(g, this->operator_input.data(), this->blockMarkers(), shift, scale, y);
+        blockedLaplacianKernel<<<numBlocks(g.numOwnedThreads()), block_size>>>(g, this->operator_input.data(), this->blockMarkers(), shift, scale, y);
     else
-        helmholtzKernel<<<numBlocks(g.numOwned()), block_size>>>(g, this->operator_input.data(), shift, scale, y);
+        helmholtzKernel<<<numBlocks(g.numOwnedThreads()), block_size>>>(g, this->operator_input.data(), shift, scale, y);
     CUDA_CHECK(cudaGetLastError());
     this->immersed_boundaries.applyGhostRows(this->operator_input.data(), y, shift, scale, this->homogeneous_rules[kind], ghost_sign);
+    if (g.tiled && this->immersed_boundaries.isActive())
+        interiorIdentityKernel<<<numBlocks(g.numOwnedThreads()), block_size>>>(g, this->immersed_boundaries.geometry.cell_types.data(), x, y);
 }
 
 void FlowSolver::initialize() {
@@ -425,7 +444,7 @@ void FlowSolver::initialize() {
     initial.count = static_cast<int>(this->parameters.initial_patches.size());
     CTM_REQUIRE(initial.count <= max_initial_patches, "at most %d initial condition patches", max_initial_patches);
     for (int p = 0; p < initial.count; ++p) initial.patches[p] = this->parameters.initial_patches[p];
-    initialConditionKernel<<<numBlocks(g.numOwned()), block_size>>>(g, initial, this->velocity[0].data(), this->velocity[1].data(),
+    initialConditionKernel<<<numBlocks(g.numOwnedThreads()), block_size>>>(g, initial, this->velocity[0].data(), this->velocity[1].data(),
                                                                     this->velocity[2].data(), this->pressure.data());
     CUDA_CHECK(cudaGetLastError());
 
@@ -456,7 +475,7 @@ void FlowSolver::stage(int stage_index) {
     const StageCoefficients& coefficients = this->stages[stage_index];
     const real stage_dt = coefficients.alpha*this->parameters.dt;
     const real diffusion_number = 0.5*stage_dt*this->parameters.kinematic_viscosity;
-    const long num_owned = g.numOwned();
+    const long num_owned = g.numOwnedThreads();
     const signed char* cell_types = this->immersed_boundaries.geometry.cell_types.data();
 
     // explicit convection with the current divergence free face velocities
@@ -474,7 +493,7 @@ void FlowSolver::stage(int stage_index) {
                                                                  this->pressure.data(), this->boundary_offsets[component].data(), cell_types,
                                                                  this->rhs.data());
         gatherOwnedKernel<<<numBlocks(num_owned), block_size>>>(g, this->velocity[component].data(), this->solution.data());
-        SpectralSolver& preconditioner = *this->helmholtz_preconditioners[stage_index*this->num_dims + component];
+        Preconditioner& preconditioner = *this->helmholtz_preconditioners[stage_index*this->num_dims + component];
         const FieldKind kind = static_cast<FieldKind>(component);
         this->iterations[component] = this->gmres.solve(
             [&](const real* x, real* y) { this->applyOperator(x, y, kind, 1.0, -diffusion_number, 1.0); },
@@ -507,7 +526,7 @@ void FlowSolver::stage(int stage_index) {
 
 void FlowSolver::project(real stage_dt) {
     const GridView& g = this->grid;
-    const long num_owned = g.numOwned();
+    const long num_owned = g.numOwnedThreads();
     const signed char* cell_types = this->immersed_boundaries.geometry.cell_types.data();
 
     // pressure correction from the divergence of the predicted face velocities, zero normal gradient mirrored into the ghost cells
@@ -537,15 +556,15 @@ void FlowSolver::project(real stage_dt) {
 }
 
 real FlowSolver::maxDivergence() {
-    divergenceKernel<<<numBlocks(this->grid.numOwned()), block_size>>>(this->grid, this->faces[0].data(), this->faces[1].data(),
+    divergenceKernel<<<numBlocks(this->grid.numOwnedThreads()), block_size>>>(this->grid, this->faces[0].data(), this->faces[1].data(),
                                                                        this->faces[2].data(), this->immersed_boundaries.geometry.cell_types.data(),
                                                                        1.0, true, this->rhs.data());
-    return maxAbsolute(this->grid.numOwned(), this->rhs.data(), nullptr, this->reduction);
+    return maxAbsolute(this->grid.numOwnedVector(), this->rhs.data(), nullptr, this->reduction);
 }
 
 FieldPeak FlowSolver::locatePeak(const signed char* cell_types) {
     FieldPeak peak;
-    const long count = this->grid.numOwned();
+    const long count = this->grid.numOwnedVector();
     peak.value = maxAbsolute(count, this->rhs.data(), cell_types, this->reduction);
     if (!std::isfinite(peak.value)) return peak;
 
@@ -561,7 +580,7 @@ FieldPeak FlowSolver::locatePeak(const signed char* cell_types) {
     real packed[8] = {0, 0, 0, 0, 0, 0, 0, 0};  // found, global i j k, cell type + 1, solid neighbors + 1, on face
     if (local != none) {
         int i, j, k;
-        this->grid.ownedCell(static_cast<long>(local), i, j, k);
+        this->grid.entryCell(static_cast<long>(local), i, j, k);
         const Geometry& geometry = this->immersed_boundaries.geometry;
         signed char type = -1;
         int solid_neighbors = -1;
@@ -605,7 +624,7 @@ FieldPeak FlowSolver::locatePeak(const signed char* cell_types) {
 
 StepDiagnostics FlowSolver::diagnostics(real dt) {
     StepDiagnostics result;
-    const long count = this->grid.numOwned();
+    const long count = this->grid.numOwnedThreads();
     const signed char* cell_types = this->immersed_boundaries.isActive() ? this->immersed_boundaries.geometry.cell_types.data() : nullptr;
     auto fill = [&](int quantity) {
         diagnosticValuesKernel<<<numBlocks(count), block_size>>>(this->grid, quantity, dt, this->velocity[0].data(), this->velocity[1].data(),
@@ -626,8 +645,8 @@ StepDiagnostics FlowSolver::diagnostics(real dt) {
 
 bool FlowSolver::isFinite() {
     for (int component = 0; component < this->num_dims; ++component) {
-        gatherOwnedKernel<<<numBlocks(this->grid.numOwned()), block_size>>>(this->grid, this->velocity[component].data(), this->rhs.data());
-        if (!std::isfinite(maxAbsolute(this->grid.numOwned(), this->rhs.data(), nullptr, this->reduction))) return false;
+        gatherOwnedKernel<<<numBlocks(this->grid.numOwnedThreads()), block_size>>>(this->grid, this->velocity[component].data(), this->rhs.data());
+        if (!std::isfinite(maxAbsolute(this->grid.numOwnedVector(), this->rhs.data(), nullptr, this->reduction))) return false;
     }
     return true;
 }
